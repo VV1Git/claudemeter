@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+*.xcodeproj
+dist/
+ClaudeMeter.app/
+.DS_Store

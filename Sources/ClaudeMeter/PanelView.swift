@@ -1,0 +1,520 @@
+import SwiftUI
+import UsageCore
+
+// MARK: - Panel
+
+/// The whole menu bar panel: two meters, three collapsible sections, a stats grid, a footer.
+///
+/// One fixed-width column with no scroll view — everything that can grow without bound lives
+/// inside a disclosure section, and the sections remember their state across launches so the panel
+/// reopens at the height the user left it at.
+struct PanelView: View {
+    @Environment(AppModel.self) private var model
+
+    @AppStorage(Prefs.expandedFiveHour) private var expandedFiveHour = Prefs.Default.expandedFiveHour
+    @AppStorage(Prefs.expandedSessions) private var expandedSessions = Prefs.Default.expandedSessions
+    @AppStorage(Prefs.expandedDaily) private var expandedDaily = Prefs.Default.expandedDaily
+
+    /// Drives every countdown and the "updated Ns ago" line. Ticked into state rather than read
+    /// inline so all the relative strings in one pass of the body agree with each other.
+    @State private var now = Date()
+
+    init() {}
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let notice = healthNotice {
+                HealthNotice(notice: notice)
+            }
+
+            if showsMeters {
+                meters
+            }
+
+            // Not gated on `isLive`. Recent sessions and the 30-day chart are derived from the
+            // local transcripts, so an API outage says nothing about them — they are as live as
+            // ever. Only the sparkline is built from poll samples, and it hides itself when it
+            // has none.
+            Divider()
+            sections
+
+            Divider()
+            stats
+
+            Divider()
+            footer
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(width: 320)
+        .task { await model.refreshNow() }
+        .task { await tick() }
+    }
+
+    // MARK: Meters
+
+    @ViewBuilder private var meters: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            MeterRow(
+                title: WindowKind.fiveHour.longLabel,
+                percent: model.fiveHourPercent,
+                severity: model.fiveHourSeverity,
+                resetsAt: model.fiveHourResetsAt,
+                projection: liveProjection(model.fiveHourProjection),
+                now: now)
+
+            MeterRow(
+                title: WindowKind.sevenDay.longLabel,
+                percent: model.sevenDayPercent,
+                severity: model.sevenDaySeverity,
+                resetsAt: model.sevenDayResetsAt,
+                projection: liveProjection(model.sevenDayProjection),
+                now: now)
+
+            if model.snapshot?.extraUsage?.spendLimitReached == true {
+                Label("Extra usage spend limit reached", systemImage: "creditcard")
+                    .font(.caption)
+                    .foregroundStyle(SeverityStyle.color(.warning))
+            }
+
+            if model.snapshot == nil {
+                Text("Waiting for the first reading…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .opacity(isLive ? 1 : 0.55)
+    }
+
+    /// Two em-dash meters under a "not signed in" notice say nothing the notice hasn't; once a
+    /// snapshot has ever arrived they are worth showing greyed, because those numbers were real.
+    private var showsMeters: Bool {
+        model.snapshot != nil || isLive
+    }
+
+    /// A cached percentage is still a reading that was true at a stated time; a cached projection
+    /// is a forecast from a rate nobody is measuring any more, aimed at a reset that may already
+    /// have passed. So the percentages stay greyed and the projection goes away entirely, which
+    /// is what `MeterRow` does with a nil one.
+    private func liveProjection(_ projection: Projection?) -> Projection? {
+        isLive ? projection : nil
+    }
+
+    // MARK: Sections
+
+    /// Each section's content view owns its own empty state, so this only adds the one thing they
+    /// cannot know: that a first transcript scan is still running.
+    @ViewBuilder private var sections: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // The samples themselves were real readings, so they stay visible during an outage;
+            // the dashed forecast does not, since nobody is measuring the rate any more.
+            if !model.samples.isEmpty {
+                DisclosureGroup(isExpanded: $expandedFiveHour) {
+                    SparklineView(
+                        samples: model.samples, kind: .fiveHour,
+                        projection: liveProjection(model.fiveHourProjection), now: now)
+                        .padding(.top, 4)
+                } label: {
+                    sectionLabel("Last 5 hours")
+                }
+            }
+
+            DisclosureGroup(isExpanded: $expandedSessions) {
+                Group {
+                    if model.sessions.isEmpty, model.isScanning {
+                        note("Reading transcripts…")
+                    } else {
+                        SessionsSection(sessions: model.sessions)
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                sectionLabel("Recent sessions (\(model.sessions.count))")
+            }
+
+            DisclosureGroup(isExpanded: $expandedDaily) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if model.daily.isEmpty, model.isScanning {
+                        note("Reading transcripts…")
+                    } else {
+                        DailyBarsView(daily: model.daily)
+                    }
+                    // Labelled with their own period: the bars above are the last 30 days, but
+                    // `Aggregates.modelSplit` / `effortSplit` run over every cached event, and a
+                    // split silently attributed to the section header would overstate its window.
+                    if !modelRows.isEmpty {
+                        subLabel("Models · all recorded")
+                        ShareRowsView(rows: modelRows)
+                    }
+                    if !effortRows.isEmpty {
+                        subLabel("Effort · all recorded")
+                        ShareRowsView(rows: effortRows)
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                sectionLabel("Last 30 days")
+            }
+        }
+    }
+
+    /// Fractions are taken over *every* model, not just the rows shown, so a truncated list
+    /// cannot imply the top few account for everything.
+    private var modelRows: [ShareRow] {
+        let total = model.models.reduce(0) { $0 + $1.tokens.total }
+        guard total > 0 else { return [] }
+        return model.models.prefix(5).map { usage in
+            ShareRow(
+                id: "model-\(usage.model)",
+                label: usage.displayName,
+                detail: UsageNumberFormat.tokens(usage.tokens.total),
+                fraction: Double(usage.tokens.total) / Double(total))
+        }
+    }
+
+    private var effortRows: [ShareRow] {
+        let total = model.efforts.reduce(0) { $0 + $1.tokens.total }
+        guard total > 0 else { return [] }
+        return model.efforts.prefix(5).map { usage in
+            ShareRow(
+                id: "effort-\(usage.id)",
+                label: usage.effort?.capitalized ?? "Unset",
+                detail: UsageNumberFormat.tokens(usage.tokens.total),
+                fraction: Double(usage.tokens.total) / Double(total))
+        }
+    }
+
+    // MARK: Stats
+
+    /// Never greyed with the health notice: these come from the local transcripts, so a failed
+    /// poll leaves them just as current as they were.
+    @ViewBuilder private var stats: some View {
+        if model.eventCount > 0 {
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 6) {
+                    sectionLabel("Today")
+                    grid {
+                        StatTile(
+                            label: "Tokens",
+                            value: UsageNumberFormat.tokens(model.today?.tokens.total ?? 0))
+                        StatTile(
+                            label: "Sessions",
+                            value: "\(sessionsToday)",
+                            help: "Stretches of work that started today. One transcript session "
+                                + "counts more than once if it was picked up again after a pause "
+                                + "longer than the active-gap setting.")
+                        StatTile(
+                            label: "Cost equiv",
+                            value: UsageNumberFormat.cost(model.today?.costEquivalent ?? 0),
+                            help: "Equivalent spend at published API rates. A subscription is not "
+                                + "billed per token, so this is never a bill.")
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    sectionLabel("All recorded activity")
+                    grid {
+                        StatTile(
+                            label: "Cache hit",
+                            value: UsageNumberFormat.share(model.cacheHitRatio),
+                            help: "Share of input-side tokens served from cache. Output tokens "
+                                + "are excluded — they are generated, never read.")
+                        StatTile(
+                            label: "Wall clock",
+                            value: wallClockText,
+                            help: wallClockHelp)
+                        StatTile(
+                            label: "Agent hours",
+                            value: agentHoursText,
+                            help: agentHoursHelp)
+                    }
+                }
+            }
+        } else {
+            note(
+                model.isScanning
+                    ? "Reading local transcripts…"
+                    : "No local Claude Code activity found yet.")
+        }
+    }
+
+    private func grid<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.flexible(), spacing: 8, alignment: .topLeading), count: 3),
+            alignment: .leading, spacing: 8
+        ) {
+            content()
+        }
+    }
+
+    /// `AppModel` publishes no per-day session count, so this is counted here rather than adding
+    /// an aggregate for one tile.
+    private var sessionsToday: Int {
+        let calendar = Calendar.current
+        return model.sessions.filter { calendar.isDate($0.start, inSameDayAs: now) }.count
+    }
+
+    /// Both hour figures are inferences, not measurements — the transcripts carry no durations,
+    /// so these are clustered message timestamps — hence the `~`, the same marker the cost
+    /// equivalent carries. `<1m` is already an approximation and is left alone.
+    private var wallClockText: String {
+        guard let hours = model.usageHours else { return "—" }
+        return approximate(hours.wallClock)
+    }
+
+    /// An account that has never spawned a sub-agent has no agent hours at all, and
+    /// `compactDuration` floors at `<1m`, which would read as a brief burst of agent work.
+    private var agentHoursText: String {
+        guard let hours = model.usageHours else { return "—" }
+        guard hours.agentCount > 0 else { return "None" }
+        return approximate(hours.agentTotal)
+    }
+
+    private func approximate(_ interval: TimeInterval) -> String {
+        let text = UsageNumberFormat.compactDuration(interval)
+        return text.hasPrefix("<") ? text : "~" + text
+    }
+
+    private var wallClockHelp: String {
+        guard let hours = model.usageHours else { return "" }
+        let minutes = Int((hours.gap / 60).rounded())
+        return "Active stretches across every session, merged so concurrent work counts once. "
+            + "A pause longer than \(minutes) min ends a stretch. Inferred from message "
+            + "timestamps — the transcripts record no durations — so it is an estimate."
+    }
+
+    private var agentHoursHelp: String {
+        guard let hours = model.usageHours else { return "" }
+        guard hours.agentCount > 0 else {
+            return "No sub-agent activity in the local transcripts yet."
+        }
+        return "Sum of \(hours.agentCount) sub-agent spans, inferred from message timestamps. "
+            + "20 agents running for 30 minutes is 10 agent-hours."
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Text(updatedText)
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+
+            if model.isScanning {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            Spacer(minLength: 0)
+
+            SettingsLink {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("Settings…")
+            .keyboardShortcut(",", modifiers: .command)
+
+            Button("Quit") { model.quit() }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .keyboardShortcut("q", modifiers: .command)
+        }
+    }
+
+    /// Seconds granularity, unlike `UsageNumberFormat.ago`: at a 60-second cadence "Updated now"
+    /// would sit there for a whole minute, and the point of the line is to say how fresh the
+    /// numbers above it are.
+    private var updatedText: String {
+        guard let last = model.lastUpdate else {
+            return model.isScanning ? "Scanning…" : "No reading yet"
+        }
+        // Clamped before the `Int` conversion, which traps past `Int.max`: `lastUpdate` can come
+        // from the cached snapshot on disk, whose dates are stored as raw epoch seconds.
+        let age = min(max(0, now.timeIntervalSince(last)), Self.maximumReportedAge)
+        let seconds = Int(age.rounded())
+        if seconds < 10 { return "Updated just now" }
+        if seconds < 60 { return "Updated \(seconds)s ago" }
+        if seconds < 3600 { return "Updated \(seconds / 60)m ago" }
+        if seconds < 86_400 { return "Updated \(seconds / 3600)h ago" }
+        return "Updated \(seconds / 86_400)d ago"
+    }
+
+    private static let maximumReportedAge: TimeInterval = 3_650 * 24 * 3600
+
+    // MARK: Health
+
+    private var isLive: Bool {
+        if case .live = model.health { return true }
+        return false
+    }
+
+    private var healthNotice: HealthNotice.Notice? {
+        switch model.health {
+        case .live:
+            return nil
+        case .noCredentials:
+            return notice(
+                symbol: "person.crop.circle.badge.questionmark",
+                title: "Not signed in",
+                detail: "Sign in to Claude Code, then ClaudeMeter picks the credentials up on its "
+                    + "next poll.",
+                tint: SeverityStyle.color(.warning))
+        case .staleCredentials:
+            return notice(
+                symbol: "exclamationmark.triangle",
+                title: "Token expired",
+                detail: "ClaudeMeter reads Claude Code's token but never refreshes it. Run any "
+                    + "Claude Code command to renew it.",
+                tint: SeverityStyle.color(.warning))
+        case let .offline(since, reason):
+            // "Rate limited" on its own reads as stuck. What the reader needs is when it will
+            // try again, which is our backoff — not the server's `Retry-After`, which this
+            // endpoint sends as 0.
+            var detail = reason
+            if let next = model.nextAttemptAt {
+                detail += " · retrying in \(MenuBarLabelText.compactDuration(until: next, now: now))"
+            }
+            detail += ". The statistics below come from your local transcripts and are unaffected."
+            return notice(
+                symbol: "wifi.slash",
+                title: offlineTitle(since: since),
+                detail: detail,
+                tint: Color.secondary)
+        }
+    }
+
+    /// The cached-numbers sentence is appended only when there are cached numbers: on a first
+    /// launch with no network the app has never read anything, `showsMeters` is false, and a
+    /// notice claiming to show the last reading would be describing an empty panel.
+    private func notice(
+        symbol: String, title: String, detail: String, tint: Color
+    ) -> HealthNotice.Notice {
+        HealthNotice.Notice(
+            symbol: symbol,
+            title: title,
+            detail: model.snapshot == nil
+                ? detail
+                : detail + " The meters below are the last reading, not live.",
+            tint: tint)
+    }
+
+    /// "Offline since 3:45 PM" needs a moment the numbers were true. With nothing cached, `since`
+    /// is only the first failed attempt, and a non-finite one — the snapshot cache on disk stores
+    /// dates as raw epoch seconds — has no clock time at all, so both fall back to a plain title.
+    private func offlineTitle(since: Date) -> String {
+        guard model.snapshot != nil, since.timeIntervalSince1970.isFinite else {
+            return "Can't reach the usage API"
+        }
+        return "Offline since \(offlineSinceText(since))"
+    }
+
+    /// Clock time alone while the outage started today, date as well once it did not: a panel
+    /// opened the next morning must not read yesterday afternoon as this afternoon.
+    private func offlineSinceText(_ since: Date) -> String {
+        Calendar.current.isDate(since, inSameDayAs: now)
+            ? since.formatted(date: .omitted, time: .shortened)
+            : since.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    // MARK: Shared bits
+
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .textCase(.uppercase)
+            .foregroundStyle(.secondary)
+    }
+
+    private func subLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .textCase(.uppercase)
+            .foregroundStyle(.tertiary)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: Lifecycle
+
+    /// Cancelled with the view, so a closed panel ticks nothing. `AppModel.refreshNow()` owns the
+    /// staleness gate; repeating the interval here would let the two drift apart.
+    @MainActor private func tick() async {
+        while !Task.isCancelled {
+            now = Date()
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+        }
+    }
+}
+
+// MARK: - Health notice
+
+extension PanelView {
+    /// The inline replacement for the charts when the app has no live data: what is wrong, and
+    /// what the user can do about it.
+    fileprivate struct HealthNotice: View {
+        struct Notice {
+            let symbol: String
+            let title: String
+            let detail: String
+            let tint: Color
+        }
+
+        let notice: Notice
+
+        var body: some View {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: notice.symbol)
+                    .foregroundStyle(notice.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(notice.title)
+                        .font(.callout)
+                        .fontWeight(.medium)
+                    Text(notice.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+}
+
+// MARK: - Stat tile
+
+extension PanelView {
+    fileprivate struct StatTile: View {
+        let label: String
+        let value: String
+        var help: String = ""
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label)
+                    .font(.caption)
+                    .textCase(.uppercase)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text(value)
+                    .font(.body)
+                    .fontWeight(.medium)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(help)
+            .accessibilityElement(children: .combine)
+        }
+    }
+}
