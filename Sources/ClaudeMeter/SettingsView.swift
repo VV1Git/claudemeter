@@ -41,6 +41,9 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 420)
+        // An accessory app never activates itself, so without this the window opens behind other
+        // windows, stays on whichever desktop it was last used on, or is restored off-screen.
+        .presentsAsSettingsWindow()
         .task {
             notificationStatus = await Notifier.shared.authorizationStatus()
             loginItemStatus = SMAppService.mainApp.status
