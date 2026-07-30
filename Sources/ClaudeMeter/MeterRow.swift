@@ -154,19 +154,29 @@ struct MeterRow: View {
 
     private var isEstimated: Bool { projection?.basis == .estimated }
 
-    /// Suppressed below half a point per hour: the API reports utilization coarsely, so a rate
-    /// that small is fit noise rather than a trend.
+    /// Points per hour for the 5-hour window, points per day for the weekly one.
+    ///
+    /// The unit has to match the horizon or the number stops carrying its own meaning.
+    /// Burning a whole week's budget in exactly seven days is 0.6 points an hour — a figure
+    /// that reads as nothing, and one the old flat 0.5 threshold came within a whisker of
+    /// suppressing outright. The same pace is 14 points a day, which reads as what it is.
+    ///
+    /// Suppressed below half a point in whichever unit applies: the API reports utilization
+    /// coarsely, so a rate that small is fit noise rather than a trend.
     private var rateClause: String? {
         guard let projection else { return nil }
-        let rate = projection.percentPerHour
-        guard rate.isFinite, abs(rate) >= 0.5 else { return nil }
+        let perHour = projection.percentPerHour
+        guard perHour.isFinite else { return nil }
+        let perDay = projection.kind == .sevenDay
+        let rate = perDay ? perHour * 24 : perHour
+        guard abs(rate) >= 0.5 else { return nil }
         let magnitude = abs(rate)
-        // One decimal below 10 points/hour: at the low end the difference between 0.6 and 1.4
-        // points an hour is the difference between coasting and capping before the reset.
+        // One decimal below 10: at the low end the difference between 0.6 and 1.4 is the
+        // difference between coasting and capping before the reset.
         let value = magnitude < 10
             ? String(format: "%.1f", magnitude)
             : "\(Self.integer(magnitude))"
-        return "\(rate > 0 ? "↗" : "↘") \(value) pts/hr"
+        return "\(rate > 0 ? "↗" : "↘") \(value) pts/\(perDay ? "day" : "hr")"
     }
 
     /// Dropped when the projection lands within a point of where the window already is — a flat

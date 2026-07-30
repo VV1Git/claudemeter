@@ -65,7 +65,15 @@ struct ProjectionTests {
         #expect(abs(fit.interceptPercent - 10) < 0.01)
         #expect(fit.sampleCount == 9)
         #expect(abs(fit.spanHours - 40.0 / 60) < 1e-9)
-        #expect(fit.standardErrorOfSlope < 1e-9)
+        // A geometrically perfect series still has a standard error, because the API reports
+        // whole percentage points and a run of integers that happens to lie on a line is not
+        // evidence that the underlying value did. The residual scale floors at the quantum.
+        #expect(fit.residualSigma == ProjectionEngine.quantizationSigma)
+        #expect(
+            abs(
+                fit.standardErrorOfSlope
+                    - ProjectionEngine.quantizationSigma / fit.sumSquaredDeviations.squareRoot()
+            ) < 1e-12)
 
         let projection = try #require(
             ProjectionEngine.project(
@@ -81,9 +89,11 @@ struct ProjectionTests {
         // 30% now, 10 points/hour, 2 hours of window left.
         let projected = try #require(projection.projectedAtReset)
         #expect(abs(projected - 50) < 0.05)
-        // A perfect fit still reports a band — of zero width.
+        // A perfect fit reports a band of real width, not of zero width. Zero would claim the
+        // next two hours are known to the percentage point on the strength of nine integers.
         let band = try #require(projection.projectedBand)
-        #expect(band < 0.01)
+        #expect(band > 1)
+        #expect(abs(band - ProjectionEngine.halfWidth(fit: fit, hours: 2)) < 1e-9)
         // The cap is 7 hours out but the window resets in 2, so there is no cap to show.
         #expect(projection.timeToCap == nil)
         #expect(projection.willCapEarly == false)
@@ -110,7 +120,11 @@ struct ProjectionTests {
         #expect(fit.sampleCount == 4)
         #expect(abs(fit.percentPerHour - 24) < 1e-9)
         #expect(fit.standardErrorOfSlope.isNaN == false)
-        #expect(fit.standardErrorOfSlope == 0)
+        // Finite and strictly positive: n − 2 == 2 leaves the residual variance divided by the
+        // smallest number the formula ever sees, and a collinear fixture drives it to zero
+        // before the quantization floor picks it up.
+        #expect(fit.standardErrorOfSlope > 0)
+        #expect(fit.standardErrorOfSlope.isFinite)
     }
 
     // MARK: - Rolling window: a decline is not a reset
@@ -337,12 +351,12 @@ struct ProjectionTests {
     @Test("willCapEarly is true when the fit crosses 100% before the reset")
     func capsBeforeReset() throws {
         // 10 points/hour from 50% needs 5 hours to reach 100%; the window resets in 6.
-        let series = samples(kind: .sevenDay, count: 9) { 10 + 10 * (Double($0) * 5 / 60) }
+        let series = samples(count: 9) { 10 + 10 * (Double($0) * 5 / 60) }
         let projection = try #require(
             ProjectionEngine.project(
-                kind: .sevenDay,
+                kind: .fiveHour,
                 snapshot: snapshot(
-                    sevenDay: LimitWindow(
+                    fiveHour: LimitWindow(
                         utilization: 50, resetsAt: Self.now.addingTimeInterval(6 * 3600))),
                 samples: series, events: [], now: Self.now))
 
@@ -350,6 +364,50 @@ struct ProjectionTests {
         let cap = try #require(projection.timeToCap)
         #expect(abs(cap.timeIntervalSince(Self.now) - 5 * 3600) < 20)
         #expect(projection.willCapEarly)
+    }
+
+    // MARK: - Weekly window: paced, never regressed
+
+    @Test("The weekly window is paced from its own consumption, not fitted from recent polls")
+    func weeklyIsPacedNotFitted() throws {
+        // A burst: 45 minutes of polls climbing at 10 points/hour. Regressed and carried to a
+        // reset three days out, that is a projection of several hundred percent. The window
+        // itself says something completely different — 50% consumed with four days gone — and
+        // the window is the one that knows.
+        let series = samples(kind: .sevenDay, count: 9) { 10 + 10 * (Double($0) * 5 / 60) }
+        let resetsAt = Self.now.addingTimeInterval(3 * 24 * 3600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay,
+                snapshot: snapshot(sevenDay: LimitWindow(utilization: 50, resetsAt: resetsAt)),
+                samples: series, events: [], now: Self.now))
+
+        #expect(projection.basis == .paced)
+        // Four of the seven days are gone and half the budget with them: 12.5 points a day.
+        #expect(abs(projection.percentPerHour * 24 - 12.5) < 0.01)
+        // Three days left at that pace lands at 87.5%, not at the regression's several hundred.
+        let projected = try #require(projection.projectedAtReset)
+        #expect(abs(projected - 87.5) < 0.1)
+        #expect(projected < 100)
+    }
+
+    @Test("A weekly window barely open is not paced from a single quantization step")
+    func weeklyTooYoungToPace() throws {
+        // Ten minutes in, one percentage point showing. Dividing by the elapsed time turns
+        // the rounding step itself into 6 points an hour, which reaches 1000% by the reset.
+        let resetsAt = Self.now.addingTimeInterval(7 * 24 * 3600 - 600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay,
+                snapshot: snapshot(sevenDay: LimitWindow(utilization: 1, resetsAt: resetsAt)),
+                samples: [], events: [], now: Self.now))
+
+        #expect(projection.basis != .paced)
+        // Falls through to the regression path, which has no samples and no events, so it
+        // reports no movement at all rather than the 1000% pacing would have produced.
+        #expect(projection.percentPerHour == 0)
+        let projected = try #require(projection.projectedAtReset)
+        #expect(abs(projected - 1) < 1e-9)
     }
 
     @Test("willCapEarly is false when the crossing falls beyond the reset")
@@ -407,35 +465,66 @@ struct ProjectionTests {
                 samples: series, events: [], now: Self.now))
 
         #expect(projection.basis == .measured)
+        // The projection goes with the band. A number this app cannot put an interval on is a
+        // number it must not print: shown bare it reads as a firm forecast, and the ± was the
+        // only thing on the row saying otherwise.
         #expect(projection.projectedBand == nil)
-        #expect(projection.projectedAtReset != nil)
+        #expect(projection.projectedAtReset == nil)
+        // The rate itself is still measured and still worth showing — it says what is
+        // happening now, which is a claim about the past rather than about the reset.
+        #expect(projection.percentPerHour.isFinite)
     }
 
-    @Test("The band survives up to maximumBandToShow and disappears once past it")
+    @Test("The band and the projection both survive or both disappear, on a horizon-relative test")
     func bandVisibilityTracksTheMaximum() throws {
-        // The same badly-fitting series as above. Its band widens linearly with the
-        // horizon, so the identical fit lands either side of the 40-point ceiling
-        // purely by moving `resetsAt`.
+        // The same badly-fitting series as above. Its band widens with the horizon, so the
+        // identical fit lands either side of the ceiling purely by moving `resetsAt`.
         let series = samples(count: 9) { $0 % 2 == 0 ? 50 : 68 }
         let fit = try #require(ProjectionEngine.fit(series, kind: .fiveHour, now: Self.now))
-        let pointsPerHourOfHorizon = 1.96 * fit.standardErrorOfSlope
-        #expect(pointsPerHourOfHorizon < ProjectionEngine.maximumBandToShow)
-        #expect(pointsPerHourOfHorizon * 2 > ProjectionEngine.maximumBandToShow)
 
-        func band(hoursUntilReset: Double) -> Double? {
+        func projection(hoursUntilReset: Double) -> Projection? {
             ProjectionEngine.project(
                 kind: .fiveHour,
                 snapshot: snapshot(
                     fiveHour: LimitWindow(
                         utilization: 40,
                         resetsAt: Self.now.addingTimeInterval(hoursUntilReset * 3600))),
-                samples: series, events: [], now: Self.now
-            )?.projectedBand
+                samples: series, events: [], now: Self.now)
         }
 
-        let shown = try #require(band(hoursUntilReset: 1))
-        #expect(abs(shown - pointsPerHourOfHorizon) < 1e-9)
-        #expect(band(hoursUntilReset: 2) == nil)
+        // The ceiling scales with the headroom, not with a flat 40 points: at 40% used there
+        // are 60 points to play for, so half of that is what a band has to beat.
+        let ceiling = (100 - 40.0) * 0.5
+        #expect(ProjectionEngine.bandIsInformative(ceiling - 1, currentPercent: 40))
+        #expect(!ProjectionEngine.bandIsInformative(ceiling + 1, currentPercent: 40))
+
+        // The band widens with the horizon, monotonically, so the same fit crosses the
+        // ceiling purely by moving the reset further out.
+        #expect(
+            ProjectionEngine.halfWidth(fit: fit, hours: 1)
+                < ProjectionEngine.halfWidth(fit: fit, hours: 4))
+
+        // This fit is bad enough that it is over the ceiling at any horizon: alternating
+        // 50/68 is 10 points of residual scatter, and the interval covers the anchor's own
+        // noise twice over before the slope contributes anything.
+        #expect(ProjectionEngine.halfWidth(fit: fit, hours: 0.25) > ceiling)
+        let noisy = try #require(projection(hoursUntilReset: 4))
+        #expect(noisy.projectedBand == nil)
+        #expect(noisy.projectedAtReset == nil)
+
+        // A clean fit at the same horizon and the same utilization clears it, so what is
+        // being tested is the quality of the evidence and not the shape of the test.
+        let cleanSeries = samples(count: 9) { 10 + 10 * (Double($0) * 5 / 60) }
+        let clean = try #require(
+            ProjectionEngine.project(
+                kind: .fiveHour,
+                snapshot: snapshot(
+                    fiveHour: LimitWindow(
+                        utilization: 40, resetsAt: Self.now.addingTimeInterval(4 * 3600))),
+                samples: cleanSeries, events: [], now: Self.now))
+        let shown = try #require(clean.projectedBand)
+        #expect(ProjectionEngine.bandIsInformative(shown, currentPercent: 40))
+        #expect(clean.projectedAtReset != nil)
     }
 
     // MARK: - Absent windows

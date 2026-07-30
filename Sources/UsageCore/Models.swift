@@ -479,6 +479,11 @@ public enum ProjectionBasis: String, Sendable {
     /// Derived from transcript token velocity calibrated against the current
     /// utilization, used before enough samples have accumulated.
     case estimated
+    /// The window's own consumption divided by how long it has been open, carried
+    /// forward at that average. Used for the fixed weekly window, whose horizon is
+    /// far too long to extrapolate a regression across. Needs no poll history, so it
+    /// is available from the first reading.
+    case paced
 }
 
 public struct Projection: Sendable, Equatable {

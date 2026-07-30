@@ -21,6 +21,9 @@ public enum Prefs {
     public static let firedNotificationKeys = "firedNotificationKeys"
     /// `Bool`. Default true — the 5-hour chart is the one section that opens by itself.
     public static let expandedFiveHour = "expandedFiveHour"
+    /// `Bool`. Default false — the weekly chart is the slower-moving of the two, so it stays
+    /// closed until asked for.
+    public static let expandedWeekly = "expandedWeekly"
     /// `Bool`. Default false.
     public static let expandedSessions = "expandedSessions"
     /// `Bool`. Default false.
@@ -41,6 +44,7 @@ public enum Prefs {
         public static let notificationsEnabled = false
         public static let notifyThresholdPercent = 90
         public static let expandedFiveHour = true
+        public static let expandedWeekly = false
         public static let expandedSessions = false
         public static let expandedDaily = false
     }
@@ -88,6 +92,7 @@ public enum Prefs {
             notificationsEnabled: Default.notificationsEnabled,
             notifyThresholdPercent: Default.notifyThresholdPercent,
             expandedFiveHour: Default.expandedFiveHour,
+            expandedWeekly: Default.expandedWeekly,
             expandedSessions: Default.expandedSessions,
             expandedDaily: Default.expandedDaily,
         ])

@@ -8,6 +8,18 @@ import Foundation
 /// model's input rate, so deriving them keeps a model's five numbers from ever
 /// drifting out of agreement with each other.
 public struct ModelRate: Sendable, Equatable {
+    /// The published multiples of a model's base input rate.
+    ///
+    /// Named rather than inlined because `ProjectionEngine.weight` needs the same ratios to
+    /// weight tokens by relative spend. Two copies of 1.25 and 2.0 in separate files is one
+    /// copy too many: the burn rate would keep pricing cache writes the old way for as long
+    /// as it took someone to notice.
+    public static let cacheWrite5mMultiple: Double = 1.25
+    public static let cacheWrite1hMultiple: Double = 2.0
+    public static let cacheReadMultiple: Double = 0.10
+    /// Every model in the table prices output at five times its input rate.
+    public static let outputMultiple: Double = 5.0
+
     public let inputPerMTok: Double
     public let outputPerMTok: Double
 
@@ -17,13 +29,13 @@ public struct ModelRate: Sendable, Equatable {
     }
 
     /// Cache write with the 5-minute TTL: 1.25× the base input rate.
-    public var cacheWrite5mPerMTok: Double { inputPerMTok * 1.25 }
+    public var cacheWrite5mPerMTok: Double { inputPerMTok * Self.cacheWrite5mMultiple }
 
     /// Cache write with the 1-hour TTL: 2× the base input rate.
-    public var cacheWrite1hPerMTok: Double { inputPerMTok * 2.0 }
+    public var cacheWrite1hPerMTok: Double { inputPerMTok * Self.cacheWrite1hMultiple }
 
     /// Cache read: 0.1× the base input rate.
-    public var cacheReadPerMTok: Double { inputPerMTok * 0.10 }
+    public var cacheReadPerMTok: Double { inputPerMTok * Self.cacheReadMultiple }
 }
 
 // MARK: - Pricing
@@ -44,6 +56,12 @@ public enum Pricing {
     /// against the 23:59:59 boundary would misprice.
     private static let sonnet5IntroCutoff: Date = sonnet5IntroEnd.addingTimeInterval(1)
 
+    /// The introductory rate is the *base* input rate while the window is open, so the cache
+    /// multiples hang off $2.00 and not off the standard $3.00 — cache reads bill at $0.20/MTok,
+    /// 5-minute writes at $2.50, 1-hour writes at $4.00. Checked against the published tables
+    /// rather than assumed, because it is the single largest lever on the figure this app
+    /// shows: deriving the cache rates from the standard price instead would move a corpus
+    /// dominated by Sonnet 5 cache reads by roughly a sixth.
     private static let sonnet5Intro = ModelRate(inputPerMTok: 2.00, outputPerMTok: 10.00)
 
     /// Standard published rates, per million tokens.
@@ -65,10 +83,32 @@ public enum Pricing {
     /// `date` matters because introductory pricing is a window, not a property of the
     /// model: historical events must be costed at the rate in force when they happened.
     public static func rate(for model: String, on date: Date) -> ModelRate? {
-        if model == "claude-sonnet-5", date < sonnet5IntroCutoff {
+        let id = canonical(model)
+        if id == "claude-sonnet-5", date < sonnet5IntroCutoff {
             return sonnet5Intro
         }
-        return standardRates[model]
+        return standardRates[id]
+    }
+
+    /// A model id with any dated alias suffix removed: `claude-opus-4-5-20251101` keys the
+    /// same rate as `claude-opus-4-5`.
+    ///
+    /// Transcripts carry whichever form the request was made with, and the table holds only
+    /// the undated one. Without this, a pinned or dated id misses the lookup and prices at
+    /// nothing — while `ModelUsage.displayName`, which already strips date suffixes, still
+    /// labels the row with the correct model name. The result would be a row that looks
+    /// entirely normal and reads $0.00.
+    static func canonical(_ model: String) -> String {
+        guard let marker = model.lastIndex(of: "-") else { return model }
+        let suffix = model[model.index(after: marker)...]
+        guard suffix.count == 8, suffix.allSatisfy(\.isNumber) else { return model }
+        return String(model[..<marker])
+    }
+
+    /// Whether this app knows what `model` costs. False means any cost shown for it is a
+    /// floor, not a figure — see `cost(_:model:on:)`, which charges an unknown model nothing.
+    public static func isPriced(_ model: String, on date: Date) -> Bool {
+        rate(for: model, on: date) != nil
     }
 
     /// Equivalent cost in USD at published API rates. 0 when the model has no rate.

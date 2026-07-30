@@ -203,20 +203,30 @@ public final class TranscriptScanner {
         return false
     }
 
-    /// Element-wise max, never a sum and never first-wins: a minority of repeated keys carry
-    /// differing payloads (a streamed row followed by its final form), so the largest value of
-    /// each field is the true one.
+    /// Element-wise max, never a sum: a minority of repeated keys carry differing payloads (a
+    /// streamed row followed by its final form), so the largest value of each field is the
+    /// true one.
+    ///
+    /// Everything that identifies *where* the request happened is taken from the earlier row
+    /// rather than the first one encountered. Resuming or forking a session replays the
+    /// earlier rows into a new transcript verbatim — same `requestId`, same `message.id`, new
+    /// `sessionId` — so a repeated key is very often the same request seen from a session that
+    /// merely inherited it. The tokens were spent once, in the session that made the call, and
+    /// that is the earliest sighting. Taking the first argument instead credited them to
+    /// whichever transcript `transcriptFiles()` happened to sort first, which is a property of
+    /// the path and of nothing else.
     private static func merge(_ a: UsageEvent, _ b: UsageEvent) -> UsageEvent {
-        UsageEvent(
-            key: a.key,
-            timestamp: min(a.timestamp, b.timestamp),
-            sessionId: a.sessionId.isEmpty ? b.sessionId : a.sessionId,
-            cwd: a.cwd.isEmpty ? b.cwd : a.cwd,
-            model: a.model,
-            effort: a.effort ?? b.effort,
-            isSidechain: a.isSidechain || b.isSidechain,
-            agentId: a.agentId ?? b.agentId,
-            tokens: a.tokens.maxed(with: b.tokens)
+        let (earlier, later) = a.timestamp <= b.timestamp ? (a, b) : (b, a)
+        return UsageEvent(
+            key: earlier.key,
+            timestamp: earlier.timestamp,
+            sessionId: earlier.sessionId.isEmpty ? later.sessionId : earlier.sessionId,
+            cwd: earlier.cwd.isEmpty ? later.cwd : earlier.cwd,
+            model: earlier.model,
+            effort: earlier.effort ?? later.effort,
+            isSidechain: earlier.isSidechain || later.isSidechain,
+            agentId: earlier.agentId ?? later.agentId,
+            tokens: earlier.tokens.maxed(with: later.tokens)
         )
     }
 

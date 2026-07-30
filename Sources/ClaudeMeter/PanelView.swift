@@ -23,6 +23,7 @@ struct PanelView: View {
     @Environment(AppModel.self) private var model
 
     @AppStorage(Prefs.expandedFiveHour) private var expandedFiveHour = Prefs.Default.expandedFiveHour
+    @AppStorage(Prefs.expandedWeekly) private var expandedWeekly = Prefs.Default.expandedWeekly
     @AppStorage(Prefs.expandedSessions) private var expandedSessions = Prefs.Default.expandedSessions
     @AppStorage(Prefs.expandedDaily) private var expandedDaily = Prefs.Default.expandedDaily
 
@@ -36,6 +37,9 @@ struct PanelView: View {
     /// under a third of a small laptop screen's width.
     private static let columnWidth: CGFloat = 300
     private static let columnGap: CGFloat = 16
+    /// Hoisted out of `body` so the layout and `wideWidth` cannot disagree about them.
+    private static let horizontalPadding: CGFloat = 14
+    private static let dividerThickness: CGFloat = 1
 
     /// Widen when the content is about to get tall.
     ///
@@ -44,12 +48,72 @@ struct PanelView: View {
     /// the same. One light section on its own stays narrow, because a 620pt-wide panel showing a
     /// single sparkline looks like a mistake.
     private var isWide: Bool {
-        let openLightSections = [expandedFiveHour, expandedSessions].filter { $0 }.count
+        let openLightSections = [expandedFiveHour, expandedWeekly, expandedSessions]
+            .filter { $0 }.count
         return expandedDaily || openLightSections >= 2
     }
 
-    /// Width of the single-column form. The wide form deliberately has none — see `body`.
+    /// Width of the single-column form.
     private static let narrowWidth: CGFloat = 320
+
+    /// Width available to content inside the horizontal padding, in the narrow form.
+    private static var narrowContentWidth: CGFloat { narrowWidth - horizontalPadding * 2 }
+
+    /// A legacy scroller is laid out *inside* the scroll view and takes width from it; an overlay
+    /// scroller floats above the content and takes none. This is the term that made the earlier
+    /// attempt at this arithmetic come out low. It is worth 15pt, and it is a live system
+    /// setting, so it is read rather than baked in.
+    private static var scrollerAllowance: CGFloat {
+        NSScroller.preferredScrollerStyle == .legacy
+            ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+            : 0
+    }
+
+    /// The two-column form's width, stated rather than inferred — animating towards a width
+    /// means naming it, because `.frame(width:)` cannot interpolate towards `nil`.
+    ///
+    /// 300 + 16 + 1 + 16 + 300 + 14·2 + 15 = 676, which is what the panel window measures.
+    /// Erring generous is the safe direction: a few points spare leave dead space on the right,
+    /// where a few points short clip both columns against the window edge.
+    private static var wideWidth: CGFloat {
+        columnWidth * 2 + columnGap * 2 + dividerThickness
+            + horizontalPadding * 2 + scrollerAllowance
+    }
+
+    /// Whether growing to the wide form would make AppKit re-anchor the panel.
+    ///
+    /// The panel's *leading* edge is pinned to the status item while the panel still fits to the
+    /// right of it, and AppKit flips to trailing-edge anchoring the moment it does not — moving
+    /// the window by its whole width in one frame, with no clamping to the screen. Measured
+    /// stepping a panel from 320 to 1400 under a status item at x=668 on a 1792pt screen: x held
+    /// at 668 up to a width of 1104, then jumped to −435 at 1134.
+    ///
+    /// Nothing can smooth that, so when the two widths straddle the threshold the switch is left
+    /// instant. One jump reads as a resize; a glide that ends in a jump reads as a fault.
+    private static var reanchorsBetweenWidths: Bool {
+        guard let statusItem = NSApp.windows.first(where: { $0.level == .statusBar }),
+            let screen = statusItem.screen ?? NSScreen.main
+        else { return false }
+        let room = screen.frame.maxX - statusItem.frame.minX
+        return (narrowWidth <= room) != (wideWidth <= room)
+    }
+
+    /// Natural height of the content, measured rather than assumed.
+    ///
+    /// The root `ScrollView` is why this is needed. Asked for its size with no height proposed —
+    /// which is what the hosting view does — a scroll view answers with a near-constant instead
+    /// of its content's height, and that constant is what sized the panel: the window sat at
+    /// 334pt with every section collapsed *and* the content clipped behind a scroll bar, and it
+    /// stayed 334pt however much the content grew. `maximumHeight` never bound, because its own
+    /// 400pt floor is above the height the window was taking.
+    @State private var contentHeight: CGFloat = 0
+
+    private struct ContentHeightKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
 
     /// Never taller than the screen it is hanging from. Read at layout time rather than cached,
     /// since the panel can be opened after the display arrangement has changed.
@@ -61,27 +125,39 @@ struct PanelView: View {
     var body: some View {
         ScrollView(.vertical) {
             content
-                .padding(.horizontal, 14)
+                .padding(.horizontal, Self.horizontalPadding)
                 .padding(.vertical, 12)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: ContentHeightKey.self, value: proxy.size.height)
+                    })
         }
         // Only scrolls when it has to, so a closed panel has no idle scroll affordance and does not
-        // rubber-band under the pointer.
+        // rubber-band under the pointer. Vertical only, deliberately: the wide content overflowing
+        // horizontally is what lets the growing window *uncover* the second column, and adding a
+        // horizontal axis would turn that reveal into a scrollable overflow instead.
         .scrollBounceBehavior(.basedOnSize)
-        // Fixed width for the single-column form, whose text would otherwise size to itself. The
-        // two-column form gets none on purpose: both columns already have a fixed width, so the
-        // row has a definite width of its own and the window can size to it.
+        // Both forms state a width, because a window can only be animated towards a number. The
+        // earlier version left the wide form at `nil` and let the content size itself, which is
+        // correct at rest and unanimatable in flight — so the panel arrived at its new width in
+        // one step, and SwiftUI cross-faded the two layouts over the top of the jump.
         //
-        // Computing that width here instead is what broke it — the arithmetic has to include two
-        // inter-column gaps rather than one, the divider, and the horizontal padding, and getting
-        // it low clipped the content against the window on both sides rather than overflowing
-        // visibly. Letting the content own its width removes the chance to get it wrong.
-        .frame(width: isWide ? nil : Self.narrowWidth)
-        .frame(maxHeight: maximumHeight)
-        // The column switch changes the window's width, and AppKit resizes a menu bar panel in one
-        // step. Animating the change here softens that into a short slide instead of a jump.
-        // Deliberately brief: the same duration as the section toggle that triggered it, so the two
-        // read as one movement rather than a resize chasing a disclosure.
-        .animation(PanelSection<EmptyView>.toggle, value: isWide)
+        // Height rides in the same modifier rather than in a `.frame(maxHeight:)` of its own, so
+        // the two dimensions are interpolated from a single animatable value and the window
+        // cannot finish widening before it has finished growing. See `PanelSize` for why an
+        // ordinary `.frame` does not reach the window at all.
+        .modifier(
+            PanelSize(
+                width: isWide ? Self.wideWidth : Self.narrowWidth,
+                height: contentHeight > 0 ? min(contentHeight, maximumHeight) : 0))
+        .onPreferenceChange(ContentHeightKey.self) { height in
+            contentHeight = height
+        }
+        .animation(
+            Self.reanchorsBetweenWidths ? nil : PanelSection<EmptyView>.toggle,
+            value: isWide)
+        .animation(PanelSection<EmptyView>.toggle, value: contentHeight)
         .task { await model.refreshNow() }
         .task { await tick() }
     }
@@ -93,16 +169,33 @@ struct PanelView: View {
                 HealthNotice(notice: notice)
             }
 
-            if isWide {
-                HStack(alignment: .top, spacing: Self.columnGap) {
-                    column { narrowLeadingContent }
+            // One HStack in both forms, so the leading column keeps its identity across the
+            // switch and only the breakdown changes parent. Branching between an HStack and a
+            // VStack gave the two layouts *different* identities, and SwiftUI cross-faded
+            // them — mid-flight the panel drew the outgoing single column at full opacity on
+            // top of the incoming two, which is the ghosting half of the old jump.
+            HStack(alignment: .top, spacing: isWide ? Self.columnGap : 0) {
+                VStack(alignment: .leading, spacing: 12) {
+                    narrowLeadingContent
+                    // Narrow, the breakdown simply carries on down the same column.
+                    if !isWide {
+                        Divider()
+                        dailySection
+                    }
+                }
+                .frame(
+                    width: isWide ? Self.columnWidth : Self.narrowContentWidth,
+                    alignment: .topLeading)
+
+                if isWide {
                     Divider()
                     column { dailySection }
                 }
-            } else {
-                narrowLeadingContent
-                dailySection
             }
+            // No fade on the second column. It is laid out at its final position from the first
+            // frame and the widening window uncovers it, which is the motion the resize already
+            // implies; cross-fading it as well reads as two effects fighting.
+            .transition(.identity)
 
             Divider()
             footer
@@ -194,7 +287,19 @@ struct PanelView: View {
                 PanelSection(title: "Last 5 hours", isExpanded: $expandedFiveHour) {
                     SparklineView(
                         samples: model.samples, kind: .fiveHour,
-                        projection: liveProjection(model.fiveHourProjection), now: now)
+                        projection: liveProjection(model.fiveHourProjection), now: now,
+                        severity: model.fiveHourSeverity)
+                }
+
+                // The weekly window gets the same treatment for the same reason: the shaded
+                // cone is where its uncertainty lives, and the weekly forecast is the one
+                // carrying by far the most of it — days of horizon against a limit whose pace
+                // is set by behaviour rather than by anything measurable in the last hour.
+                PanelSection(title: "Last 7 days", isExpanded: $expandedWeekly) {
+                    SparklineView(
+                        samples: model.samples, kind: .sevenDay,
+                        projection: liveProjection(model.sevenDayProjection), now: now,
+                        severity: model.sevenDaySeverity)
                 }
             }
 
@@ -374,7 +479,7 @@ struct PanelView: View {
                             help: "Share of input-side tokens served from cache. Output tokens "
                                 + "are excluded — they are generated, never read.")
                         StatTile(
-                            label: "Wall clock",
+                            label: "Active time",
                             value: wallClockText,
                             help: wallClockHelp)
                         StatTile(
@@ -435,12 +540,18 @@ struct PanelView: View {
         return text.hasPrefix("<") ? text : "~" + text
     }
 
+    /// Called "Active time" rather than "wall clock", which is what it used to say and what it
+    /// is not. The figure is the sum of the gaps *between* messages inside each stretch, so the
+    /// time spent generating a stretch's final reply is never in it, and a genuinely busy day
+    /// whose messages all sit further apart than the gap setting counts as zero. It is a floor.
     private var wallClockHelp: String {
         guard let hours = model.usageHours else { return "" }
         let minutes = Int((hours.gap / 60).rounded())
         return "Active stretches across every session, merged so concurrent work counts once. "
-            + "A pause longer than \(minutes) min ends a stretch. Inferred from message "
-            + "timestamps — the transcripts record no durations — so it is an estimate."
+            + "A pause longer than \(minutes) min ends a stretch. Measured between message "
+            + "timestamps — the transcripts record no durations — so it counts time inside a "
+            + "stretch and not the reply that ends one. A floor on time spent rather than a "
+            + "measurement of it, and it moves with the active-gap setting."
     }
 
     private var agentHoursHelp: String {

@@ -192,8 +192,9 @@ import UsageCore
     /// show the figure it is about to change without a full aggregate pass on every drag
     /// increment. Same in-memory events, no rescan.
     public func usageHoursPreview(gapMinutes: Int) -> UsageHours? {
-        guard !events.isEmpty else { return nil }
-        return Aggregates.usageHours(from: events, gap: TimeInterval(gapMinutes) * 60)
+        let settled = events.filter { $0.timestamp <= Date() }
+        guard !settled.isEmpty else { return nil }
+        return Aggregates.usageHours(from: settled, gap: TimeInterval(gapMinutes) * 60)
     }
 
     // MARK: - Aggregates
@@ -204,14 +205,19 @@ import UsageCore
     public func recomputeAggregates() {
         let now = Date()
         let gap = Prefs.Current.activeGap()
-        sessions = Aggregates.sessions(from: events, idleGap: gap, now: now)
+        // `effortSplit`, `usageHours` and `cacheHitRatio` take no `now` and so count every event
+        // handed to them, unlike the three above. A transcript written by a machine whose clock
+        // runs fast would stretch wall clock and agent hours without bound, so the clamp the
+        // others apply internally is applied here once, on behalf of all of them.
+        let settled = events.filter { $0.timestamp <= now }
+        sessions = Aggregates.sessions(from: settled, idleGap: gap, now: now)
         daily = Aggregates.daily(
-            from: events, days: Self.dailyHistoryDays, calendar: .current, now: now)
-        models = Aggregates.modelSplit(from: events, now: now)
-        efforts = Aggregates.effortSplit(from: events)
-        usageHours = events.isEmpty ? nil : Aggregates.usageHours(from: events, gap: gap)
-        cacheHitRatio = Aggregates.cacheHitRatio(from: events)
-        eventCount = events.count
+            from: settled, days: Self.dailyHistoryDays, calendar: .current, now: now)
+        models = Aggregates.modelSplit(from: settled, now: now)
+        efforts = Aggregates.effortSplit(from: settled)
+        usageHours = settled.isEmpty ? nil : Aggregates.usageHours(from: settled, gap: gap)
+        cacheHitRatio = Aggregates.cacheHitRatio(from: settled)
+        eventCount = settled.count
     }
 
     private func recomputeProjections(now: Date) {

@@ -200,10 +200,14 @@ struct SparklineView: View {
 
     /// Anchored at the snapshot's own `currentPercent` rather than at the last sample: the
     /// snapshot is the authority for "now", and the two can differ by a poll.
+    /// Every value is `isFinite`-checked before it reaches a mark. `MeterRow` and
+    /// `MenuBarLabelText` both guard their own conversions, but Swift Charts is handed these
+    /// doubles raw, and `min`/`max` return NaN unchanged rather than clamping it away.
     private var projected: [Point] {
         guard let projection,
             let resetsAt = projection.resetsAt, resetsAt > now,
-            let projectedAtReset = projection.projectedAtReset
+            let projectedAtReset = projection.projectedAtReset, projectedAtReset.isFinite,
+            projection.currentPercent.isFinite
         else { return [] }
         return [
             Point(id: 0, t: now, percent: projection.currentPercent),
@@ -214,8 +218,9 @@ struct SparklineView: View {
     private var band: [BandPoint] {
         guard let projection,
             let resetsAt = projection.resetsAt, resetsAt > now,
-            let projectedAtReset = projection.projectedAtReset,
-            let halfWidth = projection.projectedBand, halfWidth > 0
+            let projectedAtReset = projection.projectedAtReset, projectedAtReset.isFinite,
+            projection.currentPercent.isFinite,
+            let halfWidth = projection.projectedBand, halfWidth.isFinite, halfWidth > 0
         else { return [] }
         let current = projection.currentPercent
         return [
@@ -246,9 +251,13 @@ struct SparklineView: View {
     /// flattened into the ceiling.
     private var yUpper: Double {
         var highest = points.map(\.percent).max() ?? 0
-        if let projection, let projectedAtReset = projection.projectedAtReset {
-            highest = max(highest, projectedAtReset + (projection.projectedBand ?? 0))
+        if let projection, let projectedAtReset = projection.projectedAtReset,
+            projectedAtReset.isFinite
+        {
+            let band = projection.projectedBand.flatMap { $0.isFinite ? $0 : nil } ?? 0
+            highest = max(highest, projectedAtReset + band)
         }
+        guard highest.isFinite else { return 100 }
         let rounded = (max(highest, 100) / 10).rounded(.up) * 10
         return min(200, rounded)
     }
