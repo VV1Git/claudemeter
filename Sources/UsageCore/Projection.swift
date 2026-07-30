@@ -77,8 +77,8 @@ public enum ProjectionEngine {
         return Array(series[start...])
     }
 
-    /// A falling percentage is *not* a reset. The 5-hour window is rolling — utilization was
-    /// observed sliding 17% → 2% purely by ageing out, with `resets_at` drifting forward the
+    /// A falling percentage is *not* a reset. The 5-hour window is rolling — utilization can
+    /// slide a long way down purely by ageing out, with `resets_at` drifting forward the
     /// whole time. Only a cliff of at least `resetDropThreshold` points between consecutive
     /// polls, or a gap longer than the window itself, starts a new series.
     private static func isResetBoundary(_ previous: Sample, _ next: Sample, kind: WindowKind) -> Bool {

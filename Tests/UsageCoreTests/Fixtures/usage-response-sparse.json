@@ -2,14 +2,14 @@
   "five_hour": null,
   "seven_day": {
     "utilization": 93.5,
-    "resets_at": "2026-08-02T05:00:00Z",
+    "resets_at": "2026-01-18T05:00:00Z",
     "limit_dollars": null,
     "used_dollars": null,
     "remaining_dollars": null
   },
   "seven_day_opus": {
     "utilization": 41.25,
-    "resets_at": "2026-08-02T05:00:00Z"
+    "resets_at": "2026-01-18T05:00:00Z"
   },
   "extra_usage": null,
   "limits": [
@@ -18,7 +18,7 @@
       "group": "weekly",
       "percent": 93.5,
       "severity": "critical",
-      "resets_at": "2026-08-02T05:00:00Z",
+      "resets_at": "2026-01-18T05:00:00Z",
       "scope": null,
       "is_active": true
     },
@@ -39,7 +39,7 @@
       "group": "unknown_group",
       "percent": 12,
       "severity": "unrecognised_severity_value",
-      "resets_at": "2026-08-02T05:00:00Z",
+      "resets_at": "2026-01-18T05:00:00Z",
       "scope": null,
       "is_active": false
     }

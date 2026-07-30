@@ -3,8 +3,8 @@ import Foundation
 /// Date parsing for the two timestamp shapes this app meets.
 ///
 /// The usage API returns 6 fractional digits with a numeric offset
-/// (`2026-07-29T20:19:59.582576+00:00`); transcripts return 3 fractional digits
-/// with a `Z` suffix (`2026-07-29T19:23:56.813Z`). `ISO8601DateFormatter` handles
+/// (`2026-01-15T18:30:00.123456+00:00`); transcripts return 3 fractional digits
+/// with a `Z` suffix (`2026-01-15T12:00:00.000Z`). `ISO8601DateFormatter` handles
 /// both, but only with `.withFractionalSeconds` set — and it *fails* on a
 /// timestamp with no fractional part when that option is on, so both variants are
 /// kept and tried in order.

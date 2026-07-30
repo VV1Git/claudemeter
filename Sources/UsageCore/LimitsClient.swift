@@ -136,9 +136,9 @@ extension UsageSnapshot {
 // MARK: - Wire DTOs
 
 /// Wire format lives here, apart from the domain types, so the API is free to
-/// grow keys (`tangelo`, `omelette_promotional`, ...) without the models moving.
-/// Every field is optional: the observed payload nulls out most windows, and the
-/// sparse capture omits whole objects.
+/// grow keys the app has never seen without the models moving. Every field is
+/// optional: a full payload nulls out most windows, and the sparse capture omits
+/// whole objects.
 private struct UsagePayload: Decodable {
     let fiveHour: WindowPayload?
     let sevenDay: WindowPayload?

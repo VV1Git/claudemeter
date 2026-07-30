@@ -88,32 +88,32 @@ struct LimitsClientTests {
         return try Data(contentsOf: url)
     }
 
-    private static func realSnapshot(fetchedAt: Date = Date(timeIntervalSince1970: 1_785_356_000))
+    private static func fullSnapshot(fetchedAt: Date = Date(timeIntervalSince1970: 1_768_501_000))
         throws -> UsageSnapshot
     {
         try LimitsClient.decodeSnapshot(from: fixture("usage-response"), fetchedAt: fetchedAt)
     }
 
-    private static func sparseSnapshot(fetchedAt: Date = Date(timeIntervalSince1970: 1_785_356_000))
+    private static func sparseSnapshot(fetchedAt: Date = Date(timeIntervalSince1970: 1_768_501_000))
         throws -> UsageSnapshot
     {
         try LimitsClient.decodeSnapshot(
             from: fixture("usage-response-sparse"), fetchedAt: fetchedAt)
     }
 
-    // MARK: - Real capture
+    // MARK: - Full payload
 
-    @Test func decodesWindowsFromTheRealCapture() throws {
-        let fetchedAt = Date(timeIntervalSince1970: 1_785_356_100)
-        let snapshot = try Self.realSnapshot(fetchedAt: fetchedAt)
+    @Test func decodesBothWindowsFromTheFullPayload() throws {
+        let fetchedAt = Date(timeIntervalSince1970: 1_768_501_100)
+        let snapshot = try Self.fullSnapshot(fetchedAt: fetchedAt)
 
-        #expect(snapshot.fiveHour?.utilization == 17)
-        #expect(snapshot.sevenDay?.utilization == 7)
+        #expect(snapshot.fiveHour?.utilization == 42)
+        #expect(snapshot.sevenDay?.utilization == 13)
         #expect(snapshot.fetchedAt == fetchedAt)
     }
 
-    @Test func realCaptureHasThreeLimitsAndDisabledExtraUsage() throws {
-        let snapshot = try Self.realSnapshot()
+    @Test func fullPayloadHasThreeLimitsAndDisabledExtraUsage() throws {
+        let snapshot = try Self.fullSnapshot()
 
         #expect(snapshot.limits.count == 3)
         #expect(snapshot.limits.map(\.kind) == ["session", "weekly_all", "weekly_scoped"])
@@ -124,45 +124,45 @@ struct LimitsClientTests {
         #expect(extra.spendLimitReached == false)
     }
 
-    @Test func realCaptureScopedWeeklyLimitIsLabelledFable() throws {
-        let snapshot = try Self.realSnapshot()
+    @Test func fullPayloadScopedWeeklyLimitIsLabelled() throws {
+        let snapshot = try Self.fullSnapshot()
         let scoped = snapshot.scopedWeeklyLimits
 
         #expect(scoped.count == 1)
-        let fable = try #require(scoped.first)
-        #expect(fable.scopeLabel == "Fable")
-        #expect(fable.percent == 0)
-        #expect(fable.isActive == false)
+        let scopedLimit = try #require(scoped.first)
+        #expect(scopedLimit.scopeLabel == "Opus")
+        #expect(scopedLimit.percent == 0)
+        #expect(scopedLimit.isActive == false)
         // `scope` is null on the other two entries, so no label leaks onto them.
-        #expect(snapshot.limits.compactMap(\.scopeLabel) == ["Fable"])
+        #expect(snapshot.limits.compactMap(\.scopeLabel) == ["Opus"])
     }
 
-    @Test func realCaptureParsesSixDigitFractionWithNumericOffset() throws {
-        let snapshot = try Self.realSnapshot()
+    @Test func fullPayloadParsesSixDigitFractionWithNumericOffset() throws {
+        let snapshot = try Self.fullSnapshot()
 
         let fiveHourReset = try #require(snapshot.fiveHour?.resetsAt)
-        #expect(abs(fiveHourReset.timeIntervalSince1970 - 1_785_356_399.582576) < 0.001)
+        #expect(abs(fiveHourReset.timeIntervalSince1970 - 1_768_501_800.123456) < 0.001)
 
         let sevenDayReset = try #require(snapshot.sevenDay?.resetsAt)
-        #expect(abs(sevenDayReset.timeIntervalSince1970 - 1_785_646_800.582596) < 0.001)
+        #expect(abs(sevenDayReset.timeIntervalSince1970 - 1_768_712_400.123456) < 0.001)
 
         // The scoped entry has a null reset, which must stay nil rather than 1970.
         let scoped = try #require(snapshot.scopedWeeklyLimits.first)
         #expect(scoped.resetsAt == nil)
     }
 
-    @Test func realCaptureMostConstrainedIsTheFiveHourWindow() throws {
-        let snapshot = try Self.realSnapshot()
+    @Test func fullPayloadMostConstrainedIsTheFiveHourWindow() throws {
+        let snapshot = try Self.fullSnapshot()
         let constrained = try #require(snapshot.mostConstrained)
 
         #expect(constrained.kind == .fiveHour)
-        #expect(constrained.window.utilization == 17)
+        #expect(constrained.window.utilization == 42)
     }
 
     // MARK: - Sparse (hostile) capture
 
     @Test func sparseCaptureDecodesWithoutThrowing() throws {
-        let fetchedAt = Date(timeIntervalSince1970: 1_785_600_000)
+        let fetchedAt = Date(timeIntervalSince1970: 1_768_700_000)
         let snapshot = try Self.sparseSnapshot(fetchedAt: fetchedAt)
 
         #expect(snapshot.fiveHour == nil)
@@ -176,7 +176,7 @@ struct LimitsClientTests {
         let snapshot = try Self.sparseSnapshot()
         let reset = try #require(snapshot.sevenDay?.resetsAt)
 
-        #expect(reset == Date(timeIntervalSince1970: 1_785_646_800))
+        #expect(reset == Date(timeIntervalSince1970: 1_768_712_400))
     }
 
     @Test func sparseCaptureUnknownSeverityFallsBackToPercent() throws {
@@ -263,7 +263,7 @@ struct LimitsClientTests {
         // allowed to take the five-hour percentage down with it.
         let json = """
         {
-          "five_hour": {"utilization": 17.0, "resets_at": "2026-07-29T20:19:59.582576+00:00"},
+          "five_hour": {"utilization": 42.0, "resets_at": "2026-01-15T18:30:00.123456+00:00"},
           "seven_day": 42,
           "extra_usage": {"is_enabled": "nope"},
           "limits": {"not": "an array"}
@@ -272,7 +272,7 @@ struct LimitsClientTests {
         let snapshot = try LimitsClient.decodeSnapshot(
             from: Data(json.utf8), fetchedAt: Date(timeIntervalSince1970: 100))
 
-        #expect(snapshot.fiveHour?.utilization == 17)
+        #expect(snapshot.fiveHour?.utilization == 42)
         #expect(snapshot.sevenDay == nil)
         #expect(snapshot.extraUsage == nil)
         #expect(snapshot.limits.isEmpty)
@@ -284,9 +284,9 @@ struct LimitsClientTests {
     /// the same as empty, so every way of failing to read a percentage drops the
     /// window and the caller keeps serving the cached snapshot.
     @Test(arguments: [
-        #"{"utilization": "17"}"#,   // wrong type
+        #"{"utilization": "42"}"#,   // wrong type
         #"{"utilization": null}"#,   // explicitly null
-        #"{"resets_at": "2026-08-02T05:00:00Z"}"#,  // key absent
+        #"{"resets_at": "2026-01-18T05:00:00Z"}"#,  // key absent
         "{}",
     ])
     func unreadableWindowIsDroppedRatherThanReportedAsZero(window: String) throws {
@@ -351,7 +351,7 @@ struct LimitsClientTests {
     @Test func scopeLabelComesFromTheNestedModelDisplayName() throws {
         let cases: [(scope: String, expected: String?)] = [
             (#"{"model": {"id": "claude-opus-5", "display_name": "Opus"}, "surface": null}"#, "Opus"),
-            (#"{"model": {"display_name": "Fable"}}"#, "Fable"),
+            (#"{"model": {"display_name": "Haiku"}}"#, "Haiku"),
             (#"{"model": {"id": "claude-opus-5"}, "surface": null}"#, nil),
             (#"{"model": {"display_name": null}}"#, nil),
             (#"{"model": null, "surface": "web"}"#, nil),
@@ -424,11 +424,11 @@ struct LimitsClientTests {
         Stub.set(status: 200, body: body)
         defer { Stub.reset() }
 
-        let now = Date(timeIntervalSince1970: 1_785_356_200)
+        let now = Date(timeIntervalSince1970: 1_768_501_200)
         let snapshot = try await LimitsClient(session: Stub.session())
             .fetch(accessToken: "sk-test-token", now: now)
 
-        #expect(snapshot.fiveHour?.utilization == 17)
+        #expect(snapshot.fiveHour?.utilization == 42)
         #expect(snapshot.fetchedAt == now)
 
         let request = try #require(Stub.lastRequest())

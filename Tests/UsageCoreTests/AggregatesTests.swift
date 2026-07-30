@@ -46,7 +46,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 // MARK: - Sessions
 
 @Test func sessionsSplitWhenThePauseExceedsTheIdleGap() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [
         makeEvent(at: t0),
         makeEvent(at: t0 + minutes(5)),
@@ -72,7 +72,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func sessionsAreOrderedMostRecentFirstAndIgnoreFutureEvents() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [
         makeEvent(at: t0, session: "older"),
         makeEvent(at: t0 + minutes(2), session: "older"),
@@ -111,7 +111,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 // MARK: - Usage hours
 
 @Test func usageHoursUnionOverlappingSessionsButSessionTotalDoesNot() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     var events: [UsageEvent] = []
     for step in stride(from: 0.0, through: 60.0, by: 5.0) {
         events.append(makeEvent(at: t0 + minutes(step), session: "project-a"))
@@ -132,7 +132,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func wideningTheGapBridgesAPauseIntoOneStretch() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [
         makeEvent(at: t0),
         makeEvent(at: t0 + minutes(5)),
@@ -148,7 +148,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func concurrentAgentsSumToAgentHoursRegardlessOfGap() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     var events: [UsageEvent] = []
     for agent in ["agent-1", "agent-2", "agent-3"] {
         events.append(makeEvent(at: t0, agent: agent))
@@ -170,7 +170,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func agentWithASingleEventContributesNoTime() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let hours = Aggregates.usageHours(
         from: [makeEvent(at: t0, agent: "one-shot")], gap: Aggregates.defaultActiveGap)
     #expect(hours.agentCount == 1)
@@ -181,7 +181,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func theMergeSortsBeforeItClustersSoInputOrderIsIrrelevant() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     // Two five-minute stretches either side of a 25-minute idle hole.
     let ordered = [
         makeEvent(at: t0), makeEvent(at: t0 + minutes(5)),
@@ -207,7 +207,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func aPauseExactlyEqualToTheGapDoesNotSplit() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let now = t0 + minutes(60)
 
     // Exactly `gap` apart is still one stretch — the threshold is exclusive, so a user whose
@@ -223,7 +223,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func agentHoursIgnoreIdleGapsWithinOneAgent() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [
         makeEvent(at: t0, agent: "long-runner"),
         makeEvent(at: t0 + minutes(120), agent: "long-runner"),
@@ -238,7 +238,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func sessionTotalEqualsTheSummedDurationsOfTheSessionsList() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     var events: [UsageEvent] = []
     for step in stride(from: 0.0, through: 60.0, by: 5.0) {
         events.append(makeEvent(at: t0 + minutes(step), session: "project-a"))
@@ -274,15 +274,15 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 
 @Test func dailyZeroFillsAGapDayAndBucketsByTheLocalCalendar() throws {
     let calendar = try newYorkCalendar()
-    let now = try #require(ISO8601.date(from: "2026-07-29T16:00:00.000Z"))  // noon EDT, Jul 29
-    let lateOnTheTwentySeventh = try #require(ISO8601.date(from: "2026-07-28T03:00:00.000Z"))
+    let now = try #require(ISO8601.date(from: "2026-01-15T16:00:00.000Z"))  // midday UTC
+    let lateOnTheTwentySeventh = try #require(ISO8601.date(from: "2026-01-14T03:00:00.000Z"))
     let events = [
         makeEvent(
-            at: try #require(ISO8601.date(from: "2026-07-20T12:00:00.000Z")),
+            at: try #require(ISO8601.date(from: "2026-01-06T12:00:00.000Z")),
             tokens: TokenCounts(input: 42)),  // older than the window
-        makeEvent(at: try #require(ISO8601.date(from: "2026-07-27T18:00:00.000Z"))),
+        makeEvent(at: try #require(ISO8601.date(from: "2026-01-13T18:00:00.000Z"))),
         makeEvent(at: lateOnTheTwentySeventh),  // 23:00 EDT on the 27th, not the 28th in UTC
-        makeEvent(at: try #require(ISO8601.date(from: "2026-07-29T15:00:00.000Z")),
+        makeEvent(at: try #require(ISO8601.date(from: "2026-01-15T15:00:00.000Z")),
                   tokens: TokenCounts(input: 1_000_000)),
     ]
 
@@ -329,9 +329,9 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 
 @Test func dailyCountsAnEventLandingExactlyOnTheEarliestBucketBoundary() throws {
     let calendar = try newYorkCalendar()
-    let now = try #require(ISO8601.date(from: "2026-07-29T16:00:00.000Z"))
+    let now = try #require(ISO8601.date(from: "2026-01-15T16:00:00.000Z"))
     let windowStart = calendar.startOfDay(
-        for: try #require(ISO8601.date(from: "2026-07-27T12:00:00.000Z")))
+        for: try #require(ISO8601.date(from: "2026-01-13T12:00:00.000Z")))
 
     // The window is inclusive at its lower edge: midnight local on the earliest day is in range,
     // and the instant before it belongs to the previous day and must not be folded into bucket 0.
@@ -364,7 +364,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 
 @Test func dailyWithNonPositiveDaysIsEmpty() throws {
     let calendar = try newYorkCalendar()
-    let now = try #require(ISO8601.date(from: "2026-07-29T16:00:00.000Z"))
+    let now = try #require(ISO8601.date(from: "2026-01-15T16:00:00.000Z"))
     #expect(Aggregates.daily(from: [makeEvent(at: now)], days: 0, calendar: calendar, now: now).isEmpty)
     #expect(Aggregates.daily(from: [], days: -3, calendar: calendar, now: now).isEmpty)
 }
@@ -395,7 +395,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func effortSplitKeepsUnsetEffortInItsOwnBucket() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [
         makeEvent(at: t0, effort: "xhigh", tokens: TokenCounts(input: 500)),
         makeEvent(at: t0 + minutes(1), effort: "xhigh", tokens: TokenCounts(input: 500)),
@@ -419,7 +419,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func tokensSinceIncludesTheBoundaryAndExcludesEarlierEvents() throws {
-    let cutoff = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let cutoff = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [
         makeEvent(at: cutoff - 1, tokens: TokenCounts(input: 1)),
         makeEvent(at: cutoff, tokens: TokenCounts(input: 10, output: 2)),
@@ -434,7 +434,7 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 }
 
 @Test func cacheHitRatioIgnoresOutputTokens() throws {
-    let t0 = try #require(ISO8601.date(from: "2026-07-29T12:00:00.000Z"))
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [
         makeEvent(
             at: t0,
@@ -469,4 +469,48 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
 
     let julyOnly = Aggregates.sessions(from: [events[0]], idleGap: minutes(10), now: september)
     #expect(isClose(try #require(julyOnly.first).costEquivalent, 2.0))
+}
+
+// MARK: - Per-field costs
+
+/// The panel shows a cost breakdown next to the total, so the parts must sum to the whole.
+///
+/// The regression this guards: pricing the pooled per-model totals at "now" instead of at each
+/// event's own timestamp. That agrees with `costEquivalent` only while every event happens to fall
+/// under the same rate as today, so it passes for as long as no rate has lapsed and then silently
+/// stops adding up. Sonnet 5's introductory window makes that testable — these events straddle it.
+@Test func fieldCostsSumToCostEquivalentAcrossARateChange() throws {
+    let duringIntro = try #require(ISO8601.date(from: "2026-08-15T12:00:00.000Z"))
+    let afterIntro = try #require(ISO8601.date(from: "2026-09-15T12:00:00.000Z"))
+    let counts = TokenCounts(
+        input: 1_000, output: 2_000, cacheCreate: 4_000, cacheRead: 8_000,
+        cacheCreate5m: 1_000, cacheCreate1h: 3_000)
+
+    let events = [duringIntro, afterIntro].enumerated().map { index, stamp in
+        UsageEvent(
+            key: "k\(index)", timestamp: stamp, sessionId: "s", cwd: "/Users/x/p",
+            model: "claude-sonnet-5", effort: nil, isSidechain: false, tokens: counts)
+    }
+
+    let split = Aggregates.modelSplit(from: events, now: afterIntro.addingTimeInterval(3_600))
+    let usage = try #require(split.first)
+
+    // Every field is represented, so the total is a real sum rather than one dominant term.
+    #expect(usage.fieldCosts.input > 0)
+    #expect(usage.fieldCosts.cacheRead > 0)
+    #expect(usage.fieldCosts.cacheWrite > 0)
+    #expect(usage.fieldCosts.output > 0)
+    #expect(isClose(usage.fieldCosts.total, usage.costEquivalent))
+
+    // And the rate really did change between the two events, so this is not a vacuous pass: the
+    // same tokens priced entirely after the window cost strictly more than the straddling pair.
+    let bothAfter = events.map {
+        UsageEvent(
+            key: $0.key + "b", timestamp: afterIntro, sessionId: "s", cwd: "/Users/x/p",
+            model: "claude-sonnet-5", effort: nil, isSidechain: false, tokens: $0.tokens)
+    }
+    let laterSplit = try #require(
+        Aggregates.modelSplit(from: bothAfter, now: afterIntro.addingTimeInterval(3_600)).first)
+    #expect(laterSplit.costEquivalent > usage.costEquivalent)
+    #expect(isClose(laterSplit.fieldCosts.total, laterSplit.costEquivalent))
 }

@@ -13,7 +13,7 @@ import Foundation
 public enum MenuBarLabelText {
     /// A projected value no further than this from the current one is pace noise, not a
     /// trend. Any two percentages that render as the same integer differ by less than a
-    /// point, so this covers most of the way to never rendering `17% → 17%`; the clamps in
+    /// point, so this covers most of the way to never rendering `42% → 42%`; the clamps in
     /// `percentText` can still collapse two distant values onto one string, which `text`
     /// checks for separately.
     ///
@@ -91,7 +91,7 @@ public enum MenuBarLabelText {
         return "\(minutes)m"
     }
 
-    /// `17%`, rounded to the nearest point — the same rounding `MenuBarIcon` memoises its ring
+    /// `42%`, rounded to the nearest point — the same rounding `MenuBarIcon` memoises its ring
     /// on, so the number and the fill never disagree. `nil` when there is no usable value;
     /// negatives clamp to zero, since utilization is a share of a limit and `-0%` is nonsense.
     private static func percentText(_ value: Double?) -> String? {

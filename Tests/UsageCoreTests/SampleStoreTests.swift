@@ -47,7 +47,7 @@ struct SampleStoreTests {
     }
 
     /// Whole seconds so `Date` equality survives the epoch-seconds JSON round trip.
-    private var base: Date { Date(timeIntervalSince1970: 1_785_000_000) }
+    private var base: Date { Date(timeIntervalSince1970: 1_768_000_000) }
 
     // MARK: Series round trip
 
@@ -56,7 +56,7 @@ struct SampleStoreTests {
         try withTemporaryDirectory { root in
             let reset = base.addingTimeInterval(3 * 3600)
             let written = [
-                sample(base, five: 17, seven: 7, reset: reset),
+                sample(base, five: 42, seven: 13, reset: reset),
                 sample(base.addingTimeInterval(300), five: 21.5, seven: 7.25, reset: reset),
                 sample(base.addingTimeInterval(600), five: nil, seven: 8, reset: nil),
             ]
@@ -437,15 +437,15 @@ struct SampleStoreTests {
             let fiveReset = base.addingTimeInterval(2 * 3600)
             let sevenReset = base.addingTimeInterval(4 * 24 * 3600)
             let snapshot = UsageSnapshot(
-                fiveHour: LimitWindow(utilization: 17, resetsAt: fiveReset),
-                sevenDay: LimitWindow(utilization: 7, resetsAt: sevenReset),
+                fiveHour: LimitWindow(utilization: 42, resetsAt: fiveReset),
+                sevenDay: LimitWindow(utilization: 13, resetsAt: sevenReset),
                 limits: [
                     RateLimit(
-                        kind: "session", group: "session", percent: 17, severity: .normal,
+                        kind: "session", group: "session", percent: 42, severity: .normal,
                         resetsAt: fiveReset, scopeLabel: nil, isActive: true),
                     RateLimit(
                         kind: "weekly_scoped", group: "weekly", percent: 3, severity: .normal,
-                        resetsAt: sevenReset, scopeLabel: "Fable", isActive: true),
+                        resetsAt: sevenReset, scopeLabel: "Opus", isActive: true),
                 ],
                 extraUsage: ExtraUsage(isEnabled: false, utilization: nil, spendLimitReached: false),
                 fetchedAt: base
@@ -459,7 +459,7 @@ struct SampleStoreTests {
             #expect(loaded?.fiveHour?.resetsAt == fiveReset)
             #expect(loaded?.sevenDay?.resetsAt == sevenReset)
             #expect(loaded?.limits.count == 2)
-            #expect(loaded?.limits[1].scopeLabel == "Fable")
+            #expect(loaded?.limits[1].scopeLabel == "Opus")
             #expect(loaded?.fetchedAt == base)
         }
     }
@@ -491,7 +491,7 @@ struct SampleStoreTests {
         try withTemporaryDirectory { root in
             let store = makeStore(in: root)
             let first = UsageSnapshot(
-                fiveHour: LimitWindow(utilization: 17, resetsAt: nil), sevenDay: nil,
+                fiveHour: LimitWindow(utilization: 30, resetsAt: nil), sevenDay: nil,
                 limits: [], extraUsage: nil, fetchedAt: base)
             let second = UsageSnapshot(
                 fiveHour: LimitWindow(utilization: 42, resetsAt: nil), sevenDay: nil,

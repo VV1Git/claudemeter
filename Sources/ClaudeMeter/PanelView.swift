@@ -224,34 +224,22 @@ struct PanelView: View {
         }
     }
 
-    /// The same four fields priced. Summed per model, because the per-field rate is a multiple of
-    /// that model's input rate — pricing the pooled totals at one blended rate would be wrong.
+    /// The same four fields priced. Taken from `Aggregates`, which prices each event at its own
+    /// timestamp — re-pricing the pooled totals here at today's rate made the rows stop summing to
+    /// the total beside them whenever a rate had changed since the usage happened.
     private var costRows: [ShareRow] {
-        let now = Date()
-        var byField: [String: Double] = [:]
-        for usage in model.models {
-            let tokens = usage.tokens
-            let priced: [(String, TokenCounts)] = [
-                ("Input", TokenCounts(input: tokens.input)),
-                ("Cache read", TokenCounts(cacheRead: tokens.cacheRead)),
-                (
-                    "Cache write",
-                    TokenCounts(
-                        cacheCreate: tokens.cacheCreate,
-                        cacheCreate5m: tokens.cacheCreate5m,
-                        cacheCreate1h: tokens.cacheCreate1h)
-                ),
-                ("Output", TokenCounts(output: tokens.output)),
-            ]
-            for (name, counts) in priced {
-                byField[name, default: 0] += Pricing.cost(counts, model: usage.model, on: now)
-            }
-        }
-        let total = byField.values.reduce(0, +)
+        let costs = model.models.reduce(FieldCosts.zero) { $0 + $1.fieldCosts }
+        let total = costs.total
         guard total > 0 else { return [] }
-        return ["Input", "Cache read", "Cache write", "Output"].compactMap { name in
-            guard let value = byField[name], value > 0 else { return nil }
-            return ShareRow(
+        return [
+            ("Input", costs.input),
+            ("Cache read", costs.cacheRead),
+            ("Cache write", costs.cacheWrite),
+            ("Output", costs.output),
+        ]
+        .filter { $0.1 > 0 }
+        .map { name, value in
+            ShareRow(
                 id: "cost-\(name)",
                 label: name,
                 detail: UsageNumberFormat.cost(value),

@@ -4,3 +4,20 @@
 dist/
 ClaudeMeter.app/
 .DS_Store
+
+# Xcode / SwiftPM artefacts (embed absolute paths from the build machine)
+DerivedData/
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+
+# ClaudeMeter runtime state — real usage, real transcript paths. Never commit.
+events.json
+samples.jsonl
+scan-state.json
+last-snapshot.json
+
+# Local tooling / editor state
+.claude/
+.idea/
+*.swp

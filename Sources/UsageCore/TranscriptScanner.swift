@@ -26,9 +26,9 @@ public struct ScanResult: Sendable, Equatable {
     }
 
     /// Rows read per distinct request — how many times the average request was written to a
-    /// transcript. On a real corpus many assistant rows collapse to far fewer distinct
-    /// requests, so this reads well above 1.0; the *token* over-count naive summing would produce is a
-    /// separate, slightly lower figure, because the repeats are not uniformly sized.
+    /// transcript. Duplicate rows are common, so this typically reads well above 1.0; the *token*
+    /// over-count a naive sum would produce is a separate, slightly lower figure, because the
+    /// repeats are not uniformly sized.
     /// Normally ≥ 1, since every event came from a counted row. It can read lower only when a
     /// persisted event cache is adopted without its companion offsets and the transcripts that
     /// produced those events are themselves gone.
@@ -41,13 +41,12 @@ public struct ScanResult: Sendable, Equatable {
 
 /// Incremental reader for `~/.claude/projects/**/*.jsonl`.
 ///
-/// Three properties of the real corpus drive the design:
+/// Three properties of the transcript corpus drive the design:
 ///
-/// 1. It is large, so files are streamed line by line and re-read only from a
-///    persisted byte offset.
-/// 2. Assistant rows duplicate heavily — naive summing over-counts tokens substantially on the
-///    reference corpus — so rows are keyed on `(requestId, message.id)` and repeats are
-///    merged rather than summed.
+/// 1. It can grow to hundreds of megabytes, so files are streamed line by line and re-read
+///    only from a persisted byte offset.
+/// 2. Assistant rows duplicate heavily — naive summing over-counts tokens substantially — so
+///    rows are keyed on `(requestId, message.id)` and repeats are merged rather than summed.
 /// 3. Duplicates of a row already counted in an earlier pass show up in *later* bytes, so
 ///    byte offsets alone are not enough state: the deduplicated event map is persisted too.
 public final class TranscriptScanner {
@@ -204,9 +203,9 @@ public final class TranscriptScanner {
         return false
     }
 
-    /// Element-wise max, never a sum and never first-wins: of the repeated keys on the
-    /// reference corpus, 346 carry differing payloads (a streamed row followed by its final
-    /// form), so the largest value of each field is the true one.
+    /// Element-wise max, never a sum and never first-wins: a minority of repeated keys carry
+    /// differing payloads (a streamed row followed by its final form), so the largest value of
+    /// each field is the true one.
     private static func merge(_ a: UsageEvent, _ b: UsageEvent) -> UsageEvent {
         UsageEvent(
             key: a.key,
@@ -301,9 +300,9 @@ public final class TranscriptScanner {
         // The two pools are what make this actually streaming. `read(upToCount:)` hands back an
         // autoreleased buffer and `JSONSerialization` builds an autoreleased object graph per
         // line; a synchronous scan drains no pool of its own, so without these every chunk and
-        // every parsed row stays resident until the whole pass returns. Measured over the real
-        // Large corpus: draining per chunk keeps peak memory far below file size. Draining per chunk caps
-        // residency at one chunk, and draining per line caps the parsed graph at one row.
+        // every parsed row stays resident until the whole pass returns — peak memory then scales
+        // with the size of the corpus instead of staying flat. Draining per chunk caps residency
+        // at one chunk, and draining per line caps the parsed graph at one row.
         while true {
             let exhausted: Bool = try autoreleasepool {
                 guard let chunk = try handle.read(upToCount: Self.chunkSize), !chunk.isEmpty else {

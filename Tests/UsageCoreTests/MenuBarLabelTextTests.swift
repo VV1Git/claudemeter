@@ -10,7 +10,7 @@ struct MenuBarLabelTextTests {
 
     // MARK: - Fixtures
 
-    private static let now = ISO8601.date(from: "2026-07-29T20:00:00Z")!
+    private static let now = ISO8601.date(from: "2026-01-15T12:00:00Z")!
 
     /// The instant `minutes` from `now`, which is what a `resets_at` is.
     private func reset(inMinutes minutes: Double) -> Date {
@@ -18,7 +18,7 @@ struct MenuBarLabelTextTests {
     }
 
     private func label(
-        _ format: MenuBarFormat, percent: Double? = 17, projectedAtReset: Double? = nil,
+        _ format: MenuBarFormat, percent: Double? = 42, projectedAtReset: Double? = nil,
         resetsAt: Date? = nil
     ) -> String {
         MenuBarLabelText.text(
@@ -39,31 +39,31 @@ struct MenuBarLabelTextTests {
 
     @Test("percent renders the integer percentage and nothing else")
     func percentOnly() {
-        #expect(label(.percent) == "17%")
+        #expect(label(.percent) == "42%")
         // Extra values are available but this format ignores them.
         #expect(
-            label(.percent, projectedAtReset: 63, resetsAt: reset(inMinutes: 161)) == "17%")
+            label(.percent, projectedAtReset: 63, resetsAt: reset(inMinutes: 161)) == "42%")
     }
 
-    @Test("percentAndPace renders `17% → 63%`")
+    @Test("percentAndPace renders `42% → 63%`")
     func percentAndPace() {
-        #expect(label(.percentAndPace, projectedAtReset: 63) == "17% \u{2192} 63%")
+        #expect(label(.percentAndPace, projectedAtReset: 63) == "42% \u{2192} 63%")
         // A declining rolling window is a real, showable pace, not an error.
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: 3) == "17% \u{2192} 3%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: 3) == "42% \u{2192} 3%")
     }
 
-    @Test("percentAndTimeLeft renders `17% · 2h41m`")
+    @Test("percentAndTimeLeft renders `42% · 2h41m`")
     func percentAndTimeLeft() {
         #expect(
-            label(.percentAndTimeLeft, resetsAt: reset(inMinutes: 161)) == "17% \u{b7} 2h41m")
+            label(.percentAndTimeLeft, resetsAt: reset(inMinutes: 161)) == "42% \u{b7} 2h41m")
     }
 
     @Test("Every format is covered, so no case falls through to an empty label")
     func everyFormatProducesItsOwnText() {
         let texts = MenuBarFormat.allCases.map {
-            label($0, percent: 17, projectedAtReset: 63, resetsAt: reset(inMinutes: 161))
+            label($0, percent: 42, projectedAtReset: 63, resetsAt: reset(inMinutes: 161))
         }
-        #expect(texts == ["17% \u{2192} 63%", "17%", "17% \u{b7} 2h41m", ""])
+        #expect(texts == ["42% \u{2192} 63%", "42%", "42% \u{b7} 2h41m", ""])
     }
 
     /// The settings screen advertises each format with a literal example. If the formatter and
@@ -72,7 +72,7 @@ struct MenuBarLabelTextTests {
     func settingsLabelsMatchOutput() {
         for format in MenuBarFormat.allCases where format != .iconOnly {
             let produced = label(
-                format, percent: 17, projectedAtReset: 63, resetsAt: reset(inMinutes: 161))
+                format, percent: 42, projectedAtReset: 63, resetsAt: reset(inMinutes: 161))
             #expect(format.settingsLabel.hasPrefix(produced))
         }
     }
@@ -81,35 +81,35 @@ struct MenuBarLabelTextTests {
 
     @Test("A nil projection drops the arrow clause")
     func nilProjectionDropsPace() {
-        #expect(label(.percentAndPace, projectedAtReset: nil) == "17%")
+        #expect(label(.percentAndPace, projectedAtReset: nil) == "42%")
     }
 
     @Test("A projection within a point of the current value is noise and is dropped")
     func flatPaceIsSuppressed() {
         #expect(MenuBarLabelText.flatPaceTolerance == 1)
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: 17) == "17%")
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: 17.6) == "17%")
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: 16.4) == "17%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: 42) == "42%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: 42.6) == "42%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: 41.4) == "42%")
         // Exactly one point is still "within one point".
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: 18) == "17%")
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: 16) == "17%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: 43) == "42%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: 41) == "42%")
         // Just past the tolerance the clause comes back.
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: 18.2) == "17% \u{2192} 18%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: 43.2) == "42% \u{2192} 43%")
     }
 
-    @Test("The tolerance is wide enough that the label can never read `17% → 17%`")
+    @Test("The tolerance is wide enough that the label can never read `42% → 42%`")
     func identicalRenderingsNeverBothAppear() {
         // Any two values that round to the same integer are under a point apart, so the
         // tolerance subsumes them. Sweep the rounding bucket to prove it.
         for offset in stride(from: -0.49, through: 0.49, by: 0.07) {
-            let text = label(.percentAndPace, percent: 17, projectedAtReset: 17 + offset)
-            #expect(text == "17%")
+            let text = label(.percentAndPace, percent: 42, projectedAtReset: 42 + offset)
+            #expect(text == "42%")
         }
     }
 
     @Test("A pace clause survives when only the projection is large")
     func steepPaceIsShown() {
-        #expect(label(.percentAndPace, percent: 7, projectedAtReset: 148) == "7% \u{2192} 148%")
+        #expect(label(.percentAndPace, percent: 13, projectedAtReset: 148) == "13% \u{2192} 148%")
     }
 
     /// The tolerance alone does not cover this: clamping maps far-apart values onto one
@@ -138,14 +138,14 @@ struct MenuBarLabelTextTests {
 
     @Test("A nil reset time degrades percentAndTimeLeft to the percentage alone")
     func nilResetDegradesToPercent() {
-        #expect(label(.percentAndTimeLeft, resetsAt: nil) == "17%")
+        #expect(label(.percentAndTimeLeft, resetsAt: nil) == "42%")
     }
 
     /// A poll that failed for a few minutes leaves a `resets_at` in the past in the cached
     /// snapshot, and the menu bar keeps rendering it until the next success.
     @Test("A stale reset time reads `now` rather than a negative countdown")
     func staleResetInTimeLeftFormat() {
-        #expect(label(.percentAndTimeLeft, resetsAt: reset(inMinutes: -5)) == "17% \u{b7} now")
+        #expect(label(.percentAndTimeLeft, resetsAt: reset(inMinutes: -5)) == "42% \u{b7} now")
     }
 
     @Test("A non-finite percentage degrades instead of trapping the Int conversion")
@@ -155,8 +155,8 @@ struct MenuBarLabelTextTests {
             #expect(label(.percentAndPace, percent: value, projectedAtReset: 63) == "\u{2014}")
         }
         // A non-finite projection loses only the clause it belongs to.
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: Double.nan) == "17%")
-        #expect(label(.percentAndPace, percent: 17, projectedAtReset: Double.infinity) == "17%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: Double.nan) == "42%")
+        #expect(label(.percentAndPace, percent: 42, projectedAtReset: Double.infinity) == "42%")
     }
 
     // MARK: - Percentage rounding
@@ -164,9 +164,9 @@ struct MenuBarLabelTextTests {
     @Test("Percentages round to the nearest point")
     func percentagesRoundToNearest() {
         #expect(label(.percent, percent: 0) == "0%")
-        #expect(label(.percent, percent: 16.6) == "17%")
-        #expect(label(.percent, percent: 17.4) == "17%")
-        #expect(label(.percent, percent: 17.5) == "18%")
+        #expect(label(.percent, percent: 41.6) == "42%")
+        #expect(label(.percent, percent: 42.4) == "42%")
+        #expect(label(.percent, percent: 42.5) == "43%")
         #expect(label(.percent, percent: 93.5) == "94%")
         #expect(label(.percent, percent: 100) == "100%")
     }
@@ -263,11 +263,11 @@ struct MenuBarLabelTextTests {
     @Test("Percentages round to nearest while the countdown truncates, in the same label")
     func roundingRulesDifferPerField() {
         #expect(
-            label(.percentAndTimeLeft, percent: 17.9, resetsAt: reset(inMinutes: 161.9))
-                == "18% \u{b7} 2h41m")
+            label(.percentAndTimeLeft, percent: 42.9, resetsAt: reset(inMinutes: 161.9))
+                == "43% \u{b7} 2h41m")
     }
 
-    // MARK: - Against real projection output
+    // MARK: - Against live projection output
 
     /// End to end on the shapes the engine actually produces, so the formatter is exercised
     /// with a `Projection` rather than hand-picked doubles.
@@ -275,13 +275,13 @@ struct MenuBarLabelTextTests {
     func formatsAProjection() throws {
         let resetsAt = reset(inMinutes: 161)
         let snapshot = UsageSnapshot(
-            fiveHour: LimitWindow(utilization: 17, resetsAt: resetsAt), sevenDay: nil,
+            fiveHour: LimitWindow(utilization: 42, resetsAt: resetsAt), sevenDay: nil,
             limits: [], extraUsage: nil, fetchedAt: Self.now)
-        // 17 points now, rising ~17 points/hour over 2h41m of window: about 63% at reset.
+        // 42 points now, rising ~20 points/hour over 2h41m of window: about 96% at reset.
         let series = (0..<9).map { index -> Sample in
             let t = Self.now.addingTimeInterval(-Double(8 - index) * 5 * 60)
             return Sample(
-                t: t, fiveHourPct: 5 + 17 * (Double(index) * 5 / 60), fiveHourResetsAt: resetsAt,
+                t: t, fiveHourPct: 5 + 20 * (Double(index) * 5 / 60), fiveHourResetsAt: resetsAt,
                 sevenDayPct: nil, sevenDayResetsAt: nil)
         }
         let projection = try #require(
@@ -293,12 +293,12 @@ struct MenuBarLabelTextTests {
             format: .percentAndPace, percent: snapshot.fiveHour?.utilization,
             projectedAtReset: projection.projectedAtReset, resetsAt: projection.resetsAt,
             now: Self.now)
-        #expect(paced == "17% \u{2192} 63%")
+        #expect(paced == "42% \u{2192} 96%")
 
         let timed = MenuBarLabelText.text(
             format: .percentAndTimeLeft, percent: snapshot.fiveHour?.utilization,
             projectedAtReset: projection.projectedAtReset, resetsAt: projection.resetsAt,
             now: Self.now)
-        #expect(timed == "17% \u{b7} 2h41m")
+        #expect(timed == "42% \u{b7} 2h41m")
     }
 }

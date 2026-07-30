@@ -30,7 +30,7 @@ public struct ModelRate: Sendable, Equatable {
 
 /// Cost-equivalence for locally observed token usage.
 ///
-/// A Max subscription isn't billed per token, so nothing here is a bill — it is the
+/// A subscription isn't billed per token, so nothing here is a bill — it is the
 /// equivalent spend at published API rates, which is the only figure that makes usage
 /// across models comparable.
 public enum Pricing {
@@ -40,7 +40,7 @@ public enum Pricing {
     /// First instant of standard Sonnet 5 pricing, derived from `sonnet5IntroEnd` so the
     /// two can never disagree. Compared with `<` rather than testing `<= sonnet5IntroEnd`
     /// so that any instant on 2026-08-31 stays inside the window: transcript timestamps
-    /// carry milliseconds, so `2026-08-31T23:59:59.813Z` is a real value that a `<=`
+    /// carry milliseconds, so `2026-08-31T23:59:59.500Z` is a real value that a `<=`
     /// against the 23:59:59 boundary would misprice.
     private static let sonnet5IntroCutoff: Date = sonnet5IntroEnd.addingTimeInterval(1)
 

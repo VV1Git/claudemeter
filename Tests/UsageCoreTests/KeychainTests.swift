@@ -7,14 +7,14 @@ import UsageCore
 // login keychain and prompt. Everything goes through the pure `parseCredentials`
 // entry point, so no filesystem, network, or Keychain access is involved.
 
-private let realShapeJSON = """
+private let credentialShapeJSON = """
 {
   "claudeAiOauth": {
     "accessToken": "sk-ant-oat01-EXAMPLE",
     "refreshToken": "sk-ant-ort01-EXAMPLE",
     "expiresAt": 1700000000000,
     "scopes": ["user:inference", "user:profile"],
-    "subscriptionType": "max",
+    "subscriptionType": "example_plan",
     "rateLimitTier": "example_tier"
   }
 }
@@ -49,18 +49,18 @@ struct KeychainTests {
         #expect(Keychain.service == "Claude Code-credentials")
     }
 
-    @Test("Parses the real credential shape")
-    func parsesRealShape() throws {
-        let credentials = try parse(realShapeJSON)
+    @Test("Parses the full credential shape")
+    func parsesFullShape() throws {
+        let credentials = try parse(credentialShapeJSON)
         #expect(credentials.accessToken == "sk-ant-oat01-EXAMPLE")
-        #expect(credentials.subscriptionType == "max")
+        #expect(credentials.subscriptionType == "example_plan")
         #expect(credentials.rateLimitTier == "example_tier")
     }
 
     @Test("expiresAt is epoch milliseconds, not seconds")
     func millisecondsBecomeSeconds() throws {
-        let credentials = try parse(realShapeJSON)
-        #expect(credentials.expiresAt == Date(timeIntervalSince1970: 1_785_381_247.724))
+        let credentials = try parse(credentialShapeJSON)
+        #expect(credentials.expiresAt == Date(timeIntervalSince1970: 1_700_000_000))
         // Guard against the seconds/milliseconds mix-up specifically: the wrong
         // reading lands ~54,000 years in the future.
         #expect(credentials.expiresAt.timeIntervalSince1970 < 2_000_000_000)
@@ -72,7 +72,7 @@ struct KeychainTests {
         {"claudeAiOauth": {"accessToken": "t", "expiresAt": "1700000000000"}}
         """
         let credentials = try parse(json)
-        #expect(credentials.expiresAt == Date(timeIntervalSince1970: 1_785_381_247.724))
+        #expect(credentials.expiresAt == Date(timeIntervalSince1970: 1_700_000_000))
     }
 
     @Test("Optional metadata may be absent")
@@ -136,7 +136,7 @@ struct KeychainTests {
 
     @Test("Expiry compares in both directions, inclusive at the deadline")
     func expiryComparison() throws {
-        let credentials = try parse(realShapeJSON)
+        let credentials = try parse(credentialShapeJSON)
         let expiry = credentials.expiresAt
         #expect(credentials.isExpired(asOf: expiry.addingTimeInterval(1)))
         #expect(credentials.isExpired(asOf: expiry) == true)
@@ -146,8 +146,8 @@ struct KeychainTests {
 
     @Test("Identical JSON parses to equal values")
     func equalForIdenticalInput() throws {
-        let first = try parse(realShapeJSON)
-        let second = try parse(realShapeJSON)
+        let first = try parse(credentialShapeJSON)
+        let second = try parse(credentialShapeJSON)
         #expect(first == second)
     }
 }

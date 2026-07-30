@@ -81,7 +81,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let hosting = NSHostingController(rootView: rootView())
         // Neither automatic answer is usable: left to itself the controller reported a 28-point
         // height for a grouped `Form`, and `.preferredContentSize` reported the form's full
-        // expanded height — 1045 points, nearly a whole screen. The window is sized explicitly
+        // expanded height — most of a screen. The window is sized explicitly
         // instead and the form scrolls inside it.
         hosting.sizingOptions = []
 

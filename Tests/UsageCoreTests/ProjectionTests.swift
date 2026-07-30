@@ -9,7 +9,7 @@ struct ProjectionTests {
 
     // MARK: - Fixtures
 
-    private static let now = ISO8601.date(from: "2026-07-29T20:00:00Z")!
+    private static let now = ISO8601.date(from: "2026-01-15T12:00:00Z")!
 
     /// `count` samples ending at `now`, spaced `stepMinutes` apart, oldest first.
     private func samples(
@@ -117,7 +117,7 @@ struct ProjectionTests {
 
     @Test("A gently declining rolling 5-hour window fits a negative rate, not a segment break")
     func rollingDeclineIsNotAReset() throws {
-        // 17% → 2% across 40 minutes, the shape observed on the real account as usage aged out.
+        // 42% → 27% across 40 minutes: the shape a rolling window takes as usage ages out.
         let series = samples(count: 9) { 42 - Double($0) * 1.875 }
 
         #expect(ProjectionEngine.usableSamples(series, kind: .fiveHour, now: Self.now).count == 9)
@@ -131,14 +131,14 @@ struct ProjectionTests {
                 kind: .fiveHour,
                 snapshot: snapshot(
                     fiveHour: LimitWindow(
-                        utilization: 2, resetsAt: Self.now.addingTimeInterval(2 * 3600))),
+                        utilization: 27, resetsAt: Self.now.addingTimeInterval(2 * 3600))),
                 samples: series, events: [], now: Self.now))
 
         #expect(projection.basis == .measured)
         #expect(projection.sampleCount == 9)
         #expect(projection.timeToCap == nil)
         #expect(projection.willCapEarly == false)
-        // Clamped at the display floor rather than shown as −43%.
+        // Clamped at the display floor rather than shown as a negative percentage.
         #expect(projection.projectedAtReset == 0)
     }
 
@@ -173,7 +173,7 @@ struct ProjectionTests {
 
     @Test("A forward-drifting reset time is not itself a segment break")
     func driftingResetTimeIsNotASegmentBreak() throws {
-        // The real 5-hour window pushes `resets_at` forward on every poll while utilization
+        // A rolling 5-hour window pushes `resets_at` forward on every poll while utilization
         // ages out. Segmentation must key on the percentage drop alone — a moving reset time
         // is the normal state of a rolling window, not evidence that the window reset.
         let series = (0..<9).map { index -> Sample in

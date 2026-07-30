@@ -10,7 +10,7 @@ struct PricingTests {
     // MARK: - Fixed instants
 
     /// Comfortably inside the Sonnet 5 introductory window.
-    private static let insideIntro = ISO8601.date(from: "2026-07-29T19:23:56.813Z")!
+    private static let insideIntro = ISO8601.date(from: "2026-08-15T12:00:00.000Z")!
     /// Last day of the introductory window.
     private static let introLastDay = ISO8601.date(from: "2026-08-31T12:00:00Z")!
     /// The documented final second of the window.
@@ -22,7 +22,7 @@ struct PricingTests {
     /// Last representable instant of the final day, in the transcript timestamp shape.
     private static let introLastMillisecond = ISO8601.date(from: "2026-08-31T23:59:59.999Z")!
     /// A realistic transcript timestamp in the final second of the window.
-    private static let introFinalSecondWithMillis = ISO8601.date(from: "2026-08-31T23:59:59.813Z")!
+    private static let introFinalSecondWithMillis = ISO8601.date(from: "2026-08-31T23:59:59.500Z")!
     /// One millisecond into standard pricing.
     private static let afterIntroFirstMillisecond = ISO8601.date(from: "2026-09-01T00:00:00.001Z")!
     /// 2026-08-31 in local terms at UTC−7, but 2026-09-01 in UTC.

@@ -11,8 +11,8 @@ import UsageCore
 /// `@MainActor` is a hard requirement rather than a convenience: `SampleStore` and
 /// `TranscriptScanner` are plain classes with unsynchronised mutable state and no `Sendable`
 /// conformance, so the single-actor confinement here is what makes them safe to use at all.
-/// The one piece of work that cannot run on the main actor — the transcript pass over the whole corpus —
-/// is detached, owns its own scanner, and hands back only value types (see `ScanWorker`).
+/// The one piece of work that cannot run on the main actor — the pass over the whole transcript
+/// corpus — is detached, owns its own scanner, and hands back only value types (see `ScanWorker`).
 @MainActor @Observable public final class AppModel {
 
     // MARK: Observed state
@@ -29,7 +29,7 @@ import UsageCore
     public private(set) var samples: [Sample] = []
     public private(set) var isScanning = false
     public private(set) var lastUpdate: Date?
-    /// Transcript rows read per distinct request — above 1.0 on any real corpus. Nil until a
+    /// Transcript rows read per distinct request — normally well above 1.0. Nil until a
     /// scan has completed; shown in settings to explain why these numbers are lower than a
     /// naive sum over the transcripts.
     public private(set) var inflationFactor: Double?
@@ -56,9 +56,11 @@ import UsageCore
     private static let slowdownFactor: Double = 2.0
     /// Consecutive clean polls required before trying a slightly faster cadence.
     private static let successesBeforeSpeedup = 12
-    /// How much of the interval is given back after that run of successes. Additive-increase,
-    /// multiplicative-decrease: quick to retreat, slow to advance, which is what keeps it from
-    /// oscillating in and out of the limit.
+    /// How much of the interval is given back after that run of successes.
+    ///
+    /// Both directions are multiplicative — double on refusal, give back a fifth after a clean run —
+    /// so it retreats fast and advances slowly, which is what keeps it from oscillating in and out of
+    /// the limit. (Not additive-increase/multiplicative-decrease, despite the shape of the idea.)
     private static let speedupFactor: Double = 0.8
 
     private static let maximumBackoff: TimeInterval = 300
@@ -474,9 +476,9 @@ import UsageCore
         guard scanTask == nil else { return }
         isScanning = true
         lastScanAt = Date()
-        // Detached, and with its own scanner instance: the first pass reads the whole corpus, which must
-        // never block panel presentation, and `TranscriptScanner` is not `Sendable`, so nothing
-        // but the resulting value types may cross back.
+        // Detached, and with its own scanner instance: the first pass reads the entire corpus,
+        // which must never block panel presentation, and `TranscriptScanner` is not `Sendable`, so
+        // nothing but the resulting value types may cross back.
         let work = Task.detached(priority: .utility) { ScanWorker.run() }
         scanTask = Task { [weak self] in
             let outcome = await work.value

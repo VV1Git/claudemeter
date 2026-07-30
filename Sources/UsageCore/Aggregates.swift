@@ -23,7 +23,7 @@ public enum Aggregates {
 
     /// Sessions ordered most-recent-first, split wherever the pause between consecutive
     /// messages exceeds `idleGap` — a transcript session id can span days of on-and-off work,
-    /// which would otherwise report a 14-hour "session".
+    /// which would otherwise report a single session spanning many hours of inactivity.
     public static func sessions(
         from events: [UsageEvent], idleGap: TimeInterval, now: Date
     ) -> [SessionStat] {
@@ -203,23 +203,46 @@ public enum Aggregates {
         var tokens: [String: TokenCounts] = [:]
         var counts: [String: Int] = [:]
         var costs: [String: Double] = [:]
+        var fields: [String: FieldCosts] = [:]
         for event in events where event.timestamp <= now {
             tokens[event.model, default: .zero] += event.tokens
             counts[event.model, default: 0] += 1
             costs[event.model, default: 0] += Pricing.cost(
                 event.tokens, model: event.model, on: event.timestamp)
+            fields[event.model, default: .zero] += Self.fieldCosts(for: event)
         }
         return tokens.map { model, counted in
             ModelUsage(
                 model: model,
                 tokens: counted,
                 messageCount: counts[model] ?? 0,
-                costEquivalent: costs[model] ?? 0)
+                costEquivalent: costs[model] ?? 0,
+                fieldCosts: fields[model] ?? .zero)
         }
         .sorted { lhs, rhs in
             if lhs.tokens.total != rhs.tokens.total { return lhs.tokens.total > rhs.tokens.total }
             return lhs.model < rhs.model
         }
+    }
+
+    /// One event's cost split by field, priced at that event's own timestamp.
+    ///
+    /// Each field is priced by handing `Pricing.cost` a `TokenCounts` carrying only that field, so
+    /// the per-field multiples stay in one place. Summing these over a model reproduces
+    /// `Pricing.cost` on the pooled counts exactly, because it is the same arithmetic per event.
+    private static func fieldCosts(for event: UsageEvent) -> FieldCosts {
+        let t = event.tokens
+        func priced(_ counts: TokenCounts) -> Double {
+            Pricing.cost(counts, model: event.model, on: event.timestamp)
+        }
+        return FieldCosts(
+            input: priced(TokenCounts(input: t.input)),
+            cacheRead: priced(TokenCounts(cacheRead: t.cacheRead)),
+            cacheWrite: priced(
+                TokenCounts(
+                    cacheCreate: t.cacheCreate,
+                    cacheCreate5m: t.cacheCreate5m, cacheCreate1h: t.cacheCreate1h)),
+            output: priced(TokenCounts(output: t.output)))
     }
 
     /// Per-effort totals. Requests that carried no `effort` field form their own bucket keyed by

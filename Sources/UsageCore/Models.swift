@@ -242,9 +242,9 @@ public struct UsageEvent: Codable, Sendable, Equatable {
     public let model: String
     public let effort: String?
     public let isSidechain: Bool
-    /// Present exactly when `isSidechain` is true — verified across a full transcript corpus,
-    /// where every sidechain row carried an `agentId` and no others did. This is the
-    /// lane identifier that agent-hours is summed over.
+    /// Present exactly when `isSidechain` is true — every sidechain row observed carried an
+    /// `agentId`, and no other rows did. This is the lane identifier that agent-hours is
+    /// summed over.
     public let agentId: String?
     public var tokens: TokenCounts
 
@@ -327,7 +327,7 @@ public struct DailyStat: Sendable, Equatable, Identifiable {
 /// Time spent using Claude, in two readings that answer different questions.
 ///
 /// There are no duration fields in the transcripts — verified by scanning every key matching
-/// `dur|elapsed|ms$|latency|time|start|end` across the whole corpus — so wall-clock time is
+/// `dur|elapsed|ms$|latency|time|start|end` across a transcript corpus — so wall-clock time is
 /// inferred by clustering message timestamps, and the gap that ends a stretch is a user setting.
 public struct UsageHours: Sendable, Equatable {
     /// Union of active stretches across *all* sessions, so two projects worked concurrently
@@ -360,11 +360,46 @@ public struct UsageHours: Sendable, Equatable {
     }
 }
 
+/// Equivalent cost split by which side of the request the tokens were on.
+///
+/// Computed where the event timestamps still exist, because each field bills at a different
+/// multiple of the model's input rate *and* the rate itself can change over time. Pricing an
+/// already-pooled total at one date is what made an earlier version of the panel's breakdown stop
+/// summing to the total beside it once an introductory rate lapsed.
+public struct FieldCosts: Sendable, Equatable {
+    public var input: Double
+    public var cacheRead: Double
+    public var cacheWrite: Double
+    public var output: Double
+
+    public init(input: Double = 0, cacheRead: Double = 0, cacheWrite: Double = 0, output: Double = 0) {
+        self.input = input
+        self.cacheRead = cacheRead
+        self.cacheWrite = cacheWrite
+        self.output = output
+    }
+
+    public static let zero = FieldCosts()
+
+    /// Equal to the model's `costEquivalent` by construction — the same events, the same rates.
+    public var total: Double { input + cacheRead + cacheWrite + output }
+
+    public static func + (a: FieldCosts, b: FieldCosts) -> FieldCosts {
+        FieldCosts(
+            input: a.input + b.input, cacheRead: a.cacheRead + b.cacheRead,
+            cacheWrite: a.cacheWrite + b.cacheWrite, output: a.output + b.output)
+    }
+
+    public static func += (a: inout FieldCosts, b: FieldCosts) { a = a + b }
+}
+
 public struct ModelUsage: Sendable, Equatable, Identifiable {
     public let model: String
     public let tokens: TokenCounts
     public let messageCount: Int
     public let costEquivalent: Double
+    /// `costEquivalent` broken out by field, priced at the same per-event rates.
+    public let fieldCosts: FieldCosts
 
     public var id: String { model }
 
@@ -382,11 +417,15 @@ public struct ModelUsage: Sendable, Equatable, Identifiable {
         return version.isEmpty ? name : "\(name) \(version.joined(separator: "."))"
     }
 
-    public init(model: String, tokens: TokenCounts, messageCount: Int, costEquivalent: Double) {
+    public init(
+        model: String, tokens: TokenCounts, messageCount: Int, costEquivalent: Double,
+        fieldCosts: FieldCosts = .zero
+    ) {
         self.model = model
         self.tokens = tokens
         self.messageCount = messageCount
         self.costEquivalent = costEquivalent
+        self.fieldCosts = fieldCosts
     }
 }
 
@@ -411,20 +450,20 @@ public struct EffortUsage: Sendable, Equatable, Identifiable {
 /// values, so this is a single switch rather than four code paths. The formatting lives in
 /// `UsageCore` (see `MenuBarLabelText`) so it can be tested without SwiftUI.
 public enum MenuBarFormat: String, Codable, Sendable, CaseIterable {
-    /// `17% → 63%` — utilization now and projected at reset. Default.
+    /// `42% → 63%` — utilization now and projected at reset. Default.
     case percentAndPace
-    /// `17%`
+    /// `42%`
     case percent
-    /// `17% · 2h41m`
+    /// `42% · 2h41m`
     case percentAndTimeLeft
     /// Ring only, no text.
     case iconOnly
 
     public var settingsLabel: String {
         switch self {
-        case .percentAndPace: "17% → 63%   (now and projected)"
-        case .percent: "17%   (just the percentage)"
-        case .percentAndTimeLeft: "17% · 2h41m   (percentage and time to reset)"
+        case .percentAndPace: "42% → 63%   (now and projected)"
+        case .percent: "42%   (just the percentage)"
+        case .percentAndTimeLeft: "42% · 2h41m   (percentage and time to reset)"
         case .iconOnly: "Icon only"
         }
     }

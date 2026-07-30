@@ -15,7 +15,7 @@ build:
 ## `--no-parallel` is load-bearing, not caution. Several suites redirect the same
 ## process-global Paths.supportDirectoryOverride / claudeProjectsOverride, and
 ## swift-testing runs suites concurrently — so in parallel one suite's temp-tree
-## cleanup can delete another's mid-test. The whole suite runs in ~1s serially.
+## cleanup can delete another's mid-test. Serial execution costs little here.
 test:
 	swift test --no-parallel
 

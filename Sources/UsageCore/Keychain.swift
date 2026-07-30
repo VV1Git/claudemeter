@@ -12,7 +12,8 @@ import Security
 public struct ClaudeCredentials: Sendable, Equatable {
     public let accessToken: String
     public let expiresAt: Date
-    /// `"max"` on the observed machine. Absent on credential shapes that predate the field.
+    /// The plan identifier the CLI writes, when it writes one. Absent on credential shapes
+    /// that predate the field.
     public let subscriptionType: String?
     public let rateLimitTier: String?
 
@@ -116,7 +117,7 @@ public enum Keychain {
 
         return ClaudeCredentials(
             accessToken: token,
-            // `expiresAt` is epoch milliseconds (e.g. 1700000000000), not seconds.
+            // `expiresAt` is epoch milliseconds (13 digits, e.g. 1700000000000), not seconds.
             expiresAt: Date(timeIntervalSince1970: expiry.milliseconds / 1000),
             subscriptionType: oauth.subscriptionType,
             rateLimitTier: oauth.rateLimitTier

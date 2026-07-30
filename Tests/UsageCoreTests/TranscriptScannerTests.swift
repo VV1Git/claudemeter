@@ -89,7 +89,7 @@ struct TranscriptScannerTests {
     @Test("Malformed, blank, non-assistant and usage-less lines are skipped, never fatal")
     func malformedLinesSkipped() throws {
         try withTempEnvironment { env in
-            let usageless = #"{"type":"assistant","timestamp":"2026-07-11T23:10:08.208Z","message":{"id":"msg_x","model":"claude-sonnet-5"}}"#
+            let usageless = #"{"type":"assistant","timestamp":"2026-01-15T12:00:00.000Z","message":{"id":"msg_x","model":"claude-sonnet-5"}}"#
             let lines = [
                 "{not json at all",
                 "",
@@ -116,7 +116,7 @@ struct TranscriptScannerTests {
         try withTempEnvironment { env in
             let sidechain = try assistantRow(
                 requestId: "req_1", messageId: "msg_1", effort: "xhigh",
-                isSidechain: true, agentId: "a19fd")
+                isSidechain: true, agentId: "agent-1")
             let mainChain = try assistantRow(requestId: "req_2", messageId: "msg_2")
             try env.writeTranscript([sidechain, mainChain], path: "projA/a.jsonl")
 
@@ -126,7 +126,7 @@ struct TranscriptScannerTests {
 
             let byKey = Dictionary(uniqueKeysWithValues: scanner.events.map { ($0.key, $0) })
             let agentEvent = try #require(byKey["req_1|msg_1"])
-            #expect(agentEvent.agentId == "a19fd")
+            #expect(agentEvent.agentId == "agent-1")
             #expect(agentEvent.isSidechain)
             #expect(agentEvent.effort == "xhigh")
 
@@ -185,9 +185,9 @@ struct TranscriptScannerTests {
     func eventsSortedByTimestamp() throws {
         try withTempEnvironment { env in
             let late = try assistantRow(
-                requestId: "req_1", messageId: "msg_1", timestamp: "2026-07-12T09:00:00.000Z")
+                requestId: "req_1", messageId: "msg_1", timestamp: "2026-01-15T12:00:00.000Z")
             let early = try assistantRow(
-                requestId: "req_2", messageId: "msg_2", timestamp: "2026-07-11T23:10:08.208Z")
+                requestId: "req_2", messageId: "msg_2", timestamp: "2026-01-15T11:00:00.000Z")
             try env.writeTranscript([late, early], path: "projA/a.jsonl")
 
             let scanner = env.scanner()
@@ -509,7 +509,7 @@ private func assistantRow(
     requestId: String?,
     messageId: String,
     model: String = "claude-sonnet-5",
-    timestamp: String = "2026-07-11T23:10:08.208Z",
+    timestamp: String = "2026-01-15T12:00:00.000Z",
     input: Int = 10,
     output: Int = 100,
     cacheRead: Int = 0,
