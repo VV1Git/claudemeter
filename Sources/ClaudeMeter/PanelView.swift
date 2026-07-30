@@ -48,9 +48,8 @@ struct PanelView: View {
         return expandedDaily || openLightSections >= 2
     }
 
-    private var panelWidth: CGFloat {
-        isWide ? Self.columnWidth * 2 + Self.columnGap : 320
-    }
+    /// Width of the single-column form. The wide form deliberately has none — see `body`.
+    private static let narrowWidth: CGFloat = 320
 
     /// Never taller than the screen it is hanging from. Read at layout time rather than cached,
     /// since the panel can be opened after the display arrangement has changed.
@@ -68,7 +67,15 @@ struct PanelView: View {
         // Only scrolls when it has to, so a closed panel has no idle scroll affordance and does not
         // rubber-band under the pointer.
         .scrollBounceBehavior(.basedOnSize)
-        .frame(width: panelWidth)
+        // Fixed width for the single-column form, whose text would otherwise size to itself. The
+        // two-column form gets none on purpose: both columns already have a fixed width, so the
+        // row has a definite width of its own and the window can size to it.
+        //
+        // Computing that width here instead is what broke it — the arithmetic has to include two
+        // inter-column gaps rather than one, the divider, and the horizontal padding, and getting
+        // it low clipped the content against the window on both sides rather than overflowing
+        // visibly. Letting the content own its width removes the chance to get it wrong.
+        .frame(width: isWide ? nil : Self.narrowWidth)
         .frame(maxHeight: maximumHeight)
         .task { await model.refreshNow() }
         .task { await tick() }

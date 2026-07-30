@@ -456,3 +456,7 @@ overrides for the support directory and the transcript root, which is what the `
 requirement above is about.
 
 `UsageCore` imports neither SwiftUI nor AppKit. Anything with a decision in it lives there.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
