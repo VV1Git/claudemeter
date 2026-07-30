@@ -29,9 +29,14 @@ public enum Prefs {
     /// `Bool`. Default false.
     public static let expandedDaily = "expandedDaily"
 
-    /// `Double`, seconds. The cadence the app has learned, not a user setting — persisted so a
-    /// rate limit discovered in one session is still respected after a relaunch.
+    /// `Double`, seconds. The cadence the app has *learned*, not the one the user asked for —
+    /// persisted so a rate limit discovered in one session is still respected after a relaunch.
     public static let pollIntervalSeconds = "pollIntervalSeconds"
+
+    /// `Int`, seconds. The cadence the user asked for, from `pollIntervalChoices`. A target rather
+    /// than a guarantee: a 429 can still widen the interval past it, and the app works back down
+    /// to it. Default 180.
+    public static let preferredPollIntervalSeconds = "preferredPollIntervalSeconds"
 
     // MARK: - Defaults
 
@@ -47,6 +52,7 @@ public enum Prefs {
         public static let expandedWeekly = false
         public static let expandedSessions = false
         public static let expandedDaily = false
+        public static let preferredPollIntervalSeconds = 180
     }
 
     /// Bounds of the active-gap slider. Below 5 minutes a normal pause between prompts
@@ -65,22 +71,45 @@ public enum Prefs {
     public static let minimumPollInterval: TimeInterval = 90
     public static let maximumPollInterval: TimeInterval = 15 * 60
 
+    /// The cadences the Refresh picker offers, in seconds.
+    ///
+    /// 90 seconds is the fastest on offer because it is the fastest the app has ever polled: the
+    /// endpoint's budget is per account and shared with Claude Code itself, and freshness bought
+    /// with refusals is not freshness — a 429 widens the interval to several minutes, which is
+    /// slower than any setting here. The top of the range is the same ceiling the backoff obeys, so
+    /// the picker spans exactly the range the app already operated in.
+    public static let pollIntervalChoices = [90, 120, 180, 300, 600, 900]
+
     /// The learned poll cadence, clamped into the range the model allows. A value written by an
     /// older build, a corrupted domain, or a hand-edited plist cannot make the app poll in a hot
     /// loop or stop polling altogether.
-    public static func pollInterval(_ defaults: UserDefaults = .standard) -> TimeInterval {
+    public static func learnedPollInterval(_ defaults: UserDefaults = .standard) -> TimeInterval {
         let stored = defaults.double(forKey: pollIntervalSeconds)
         guard stored.isFinite, stored > 0 else { return defaultPollInterval }
         return min(max(stored, minimumPollInterval), maximumPollInterval)
     }
 
-    public static func setPollInterval(
+    public static func setLearnedPollInterval(
         _ seconds: TimeInterval, in defaults: UserDefaults = .standard
     ) {
         guard seconds.isFinite, seconds > 0 else { return }
         defaults.set(
             min(max(seconds, minimumPollInterval), maximumPollInterval),
             forKey: pollIntervalSeconds)
+    }
+
+    /// What to poll at now: the pace the user asked for, or a wider one the app learned from a
+    /// refusal, whichever is slower. Both halves matter — a backoff outlives a relaunch, and a
+    /// preference set faster than one does not entitle the app to ignore it.
+    public static func effectivePollInterval(_ defaults: UserDefaults = .standard) -> TimeInterval {
+        max(Current.preferredPollInterval(defaults), learnedPollInterval(defaults))
+    }
+
+    /// The nearest cadence the picker actually offers. A stored value from an older build or a
+    /// hand-edited plist would otherwise select none of them and leave the control blank.
+    public static func nearestPollIntervalChoice(to seconds: Int) -> Int {
+        pollIntervalChoices.min { abs($0 - seconds) < abs($1 - seconds) }
+            ?? Default.preferredPollIntervalSeconds
     }
 
     /// Seeds the registration domain so code that reads `UserDefaults` directly (the model,
@@ -95,6 +124,7 @@ public enum Prefs {
             expandedWeekly: Default.expandedWeekly,
             expandedSessions: Default.expandedSessions,
             expandedDaily: Default.expandedDaily,
+            preferredPollIntervalSeconds: Default.preferredPollIntervalSeconds,
         ])
     }
 
@@ -120,6 +150,16 @@ public enum Prefs {
         /// The same setting as `activeGapMinutes`, in the seconds `Aggregates` takes.
         public static func activeGap(_ defaults: UserDefaults = .standard) -> TimeInterval {
             TimeInterval(activeGapMinutes(defaults)) * 60
+        }
+
+        /// The cadence the user asked for. Snapped to the offered choices as well as clamped,
+        /// because the picker binds to exactly these values.
+        public static func preferredPollInterval(
+            _ defaults: UserDefaults = .standard
+        ) -> TimeInterval {
+            let raw = defaults.object(forKey: Prefs.preferredPollIntervalSeconds) as? Int
+                ?? Default.preferredPollIntervalSeconds
+            return TimeInterval(nearestPollIntervalChoice(to: raw))
         }
 
         public static func notificationsEnabled(_ defaults: UserDefaults = .standard) -> Bool {

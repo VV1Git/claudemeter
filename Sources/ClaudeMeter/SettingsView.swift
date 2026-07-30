@@ -19,6 +19,8 @@ struct SettingsView: View {
         .notificationsEnabled
     @AppStorage(Prefs.notifyThresholdPercent) private var notifyThresholdPercent = Prefs.Default
         .notifyThresholdPercent
+    @AppStorage(Prefs.preferredPollIntervalSeconds) private var preferredPollIntervalSeconds = Prefs
+        .Default.preferredPollIntervalSeconds
 
     /// Read optionally: the settings window is a separate scene, and the pane must still render if
     /// the model was not injected into it.
@@ -189,42 +191,77 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Startup
+    // MARK: - Refresh
 
-    /// Read-only on purpose. The cadence is not a preference — it is what the app has found the
-    /// endpoint will tolerate. Shown because a reading a few minutes old otherwise looks like a
-    /// stuck app rather than a deliberate choice.
+    /// The pace to aim for, not a guarantee — the backoff can still widen the interval past it, and
+    /// the second row says so when it has. Without that row the setting would look ignored, which
+    /// is the same failure the old read-only display existed to avoid.
     private var refreshSection: some View {
         Section {
-            LabeledContent("Checking limits every") {
-                Text(intervalLabel).monospacedDigit()
+            Picker(selection: preferredPollInterval) {
+                ForEach(Prefs.pollIntervalChoices, id: \.self) { seconds in
+                    Text(verbatim: Self.intervalText(TimeInterval(seconds))).tag(seconds)
+                }
+            } label: {
+                Text("Check limits every")
             }
+
+            if model?.isThrottled == true {
+                LabeledContent("Currently") {
+                    Text(verbatim: intervalLabel).monospacedDigit()
+                }
+            }
+
             Text(verbatim: refreshExplanation)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } header: {
-            Text("Refresh")
+            header("Refresh")
         }
+    }
+
+    /// Writes the preference and re-times the poll loop in one place, the same shape as the
+    /// idle-gap slider. The getter reads back through `Prefs` so a value no longer on offer selects
+    /// the nearest one rather than leaving the picker blank.
+    private var preferredPollInterval: Binding<Int> {
+        Binding(
+            get: { Int(Prefs.Current.preferredPollInterval()) },
+            set: { seconds in
+                guard seconds != preferredPollIntervalSeconds else { return }
+                preferredPollIntervalSeconds = seconds
+                model?.applyPreferredPollInterval()
+            })
     }
 
     private var refreshExplanation: String {
         if model?.isThrottled == true {
-            return "Slowed down after the usage endpoint rate-limited this account. It speeds back "
-                + "up on its own once requests are being accepted again. The statistics from your "
-                + "transcripts refresh independently of this."
+            return "The usage endpoint rate-limited this account, so ClaudeMeter is polling slower "
+                + "than you asked for. It works back towards your setting on its own once requests "
+                + "are being accepted again. The statistics from your transcripts refresh "
+                + "independently of this."
         }
-        return "Tuned automatically. The usage endpoint is rate-limited per account and shared "
-            + "with Claude Code itself, so ClaudeMeter backs off when it is refused and edges back "
-            + "up when it is not."
+        return "The pace to aim for rather than a promise. This endpoint is rate-limited per "
+            + "account and shares that budget with Claude Code itself, so ClaudeMeter backs off "
+            + "when it is refused and works back up to your setting — and a refusal costs minutes, "
+            + "which is why the fastest setting here is not the freshest by default."
     }
 
     private var intervalLabel: String {
         guard let interval = model?.pollInterval else { return "—" }
+        return Self.intervalText(interval)
+    }
+
+    /// Whole minutes read as minutes; anything under two is left in seconds, so the fastest cadence
+    /// on offer is `90 s` rather than `1 min 30 s`.
+    private static func intervalText(_ interval: TimeInterval) -> String {
         let seconds = Int(interval.rounded())
+        if seconds < 120 { return "\(seconds) s" }
         if seconds % 60 == 0 { return "\(seconds / 60) min" }
         return "\(seconds / 60) min \(seconds % 60) s"
     }
+
+    // MARK: - Startup
 
     private var startupSection: some View {
         Section {

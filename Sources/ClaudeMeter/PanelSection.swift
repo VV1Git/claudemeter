@@ -20,10 +20,11 @@ struct PanelSection<Content: View>: View {
     ///
     /// Critically damped rather than eased, because this drives a *window* resize. An ease-in-out
     /// reversed mid-flight retargets by overshooting first — measured at 584pt heading out, then
-    /// 651pt one frame after the reversal, then back — and a window that overshoots its final
-    /// width can cross the threshold where AppKit re-anchors the panel (see
-    /// `PanelView.reanchorsBetweenWidths`). A damped spring retargets from wherever it is. The
-    /// ease-in half was wasted anyway: the movement was already committed to by the click.
+    /// 651pt one frame after the reversal, then back — and an overshoot here is not a soft bounce
+    /// inside a layer, it is the window's own edge going past where it is meant to stop and coming
+    /// back, dragging the panel's position with it once `PanelAnchor` is holding that edge against
+    /// the screen. A damped spring retargets from wherever it is. The ease-in half was wasted
+    /// anyway: the movement was already committed to by the click.
     static var toggle: Animation { .smooth(duration: 0.3) }
 
     var body: some View {

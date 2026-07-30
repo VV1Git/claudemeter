@@ -5,10 +5,10 @@ handles credentials, see `README.md`.
 
 ClaudeMeter has three surfaces: the menu bar item, the panel that opens when you click it, and a
 settings window reached from the panel's gear button. Everything it shows comes from two places —
-the usage endpoint at `api.anthropic.com`, polled on a cadence the app tunes itself, and the local
-Claude Code transcripts under `~/.claude/projects`. Which source a number came from decides how it
-behaves when the network does not answer, so the distinction is worth keeping in mind while reading
-the panel.
+the usage endpoint at `api.anthropic.com`, polled on a cadence you set and the app adapts, and the
+local Claude Code transcripts under `~/.claude/projects`. Which source a number came from decides
+how it behaves when the network does not answer, so the distinction is worth keeping in mind while
+reading the panel.
 
 ## Reading the menu bar
 
@@ -83,6 +83,10 @@ breakdown in the right-hand one. It carries the daily chart and four proportion 
 single column it runs past the bottom of the screen, and a menu bar panel has nowhere to overflow
 to: it is simply clipped, and the footer becomes unreachable.
 
+If the menu bar item sits far enough right that the wider panel has nowhere to grow into, the panel
+expands leftward instead: its right edge stops a little short of the screen edge and its left edge
+keeps going, in the same motion as the resize rather than a jump at the end of it.
+
 The panel will also never exceed the height of the screen it hangs from. If the content still does
 not fit — a long session list on a short display — it scrolls, and only then; a panel that fits
 shows no scroll affordance. The sections remember whether you left them open, so it reopens in the
@@ -90,8 +94,8 @@ shape you last used.
 
 Opening the panel refreshes the limits only if the last successful poll has gone stale, where stale
 means older than nine tenths of the current cadence. Opening it twice in quick succession does not
-fire two requests. There is no manual refresh button; the loop and the panel-open check are the only
-things that poll.
+fire two requests. The refresh button in the footer is the way to override that gate; the loop, the
+panel-open check and that button are the only things that poll.
 
 While the panel is open, relative strings (`resets in …`, `Updated 12s ago`, `23m ago`) re-render
 every five seconds.
@@ -280,8 +284,15 @@ long you were at the keyboard, agent hours is how much work happened while you w
 The left of the footer says how fresh the limit numbers are — `Updated just now`, `Updated 12s ago`,
 `Updated 3m ago`. It reports seconds rather than rounding to minutes, because at a multi-minute
 cadence a line that said "Updated now" for the whole interval would defeat the purpose. A spinner
-appears beside it while a transcript scan is running. On the right, the gear opens Settings
-(<kbd>⌘,</kbd>) and `Quit` exits (<kbd>⌘Q</kbd>).
+appears beside it while a transcript scan is running. On the right: the circular arrow refreshes now
+(<kbd>⌘R</kbd>), the gear opens Settings (<kbd>⌘,</kbd>) and `Quit` exits (<kbd>⌘Q</kbd>).
+
+The refresh button asks for both halves at once — a poll for the meters and a transcript rescan for
+everything below them — and ignores the staleness gate that holds back an ordinary panel open. What it
+will not do is jump a queue the app has already committed to: while a failed poll's backoff or an
+honoured `Retry-After` is still running, the button is disabled and its tooltip says how long is left,
+because a request inside that window is one the server has already refused and every refusal widens
+the cadence for everything else. It comes back by itself within a few seconds of the wait elapsing.
 
 Before the first successful poll the line reads `Scanning…` or `No reading yet`.
 
@@ -294,7 +305,7 @@ defaults; nothing here is sent anywhere.
 | --- | --- | --- |
 | Menu bar | Format | Which of the four menu bar formats is drawn. |
 | Usage hours | Idle gap (5–30 min) | The pause that ends an active stretch. Drives the sessions list, the `Sessions` tile, and `Wall clock`. Does not affect agent hours. |
-| Refresh | Checking limits every | Read-only. Shows the cadence the app has settled on. |
+| Refresh | Check limits every (90 s, 2, 3, 5, 10, 15 min) | The cadence to aim for. A rate limit can still widen it; a second row appears showing the effective one when it has. |
 | Alerts | Notify me when a limit is running out | Master switch for notifications. Off by default. |
 | Alerts | Alert at N% of a window (50–99, steps of 5) | Threshold crossing that triggers an alert. |
 | Startup | Launch ClaudeMeter at login | Registers or unregisters the app as a login item. |
@@ -307,9 +318,12 @@ the transcripts. The current wall-clock figure sits in the same section so you c
 setting is doing. The bounds are not arbitrary: below five minutes an ordinary pause between prompts
 fragments one sitting into many, and above thirty an evening off reads as continuous work.
 
-**Refresh is deliberately read-only.** It is not a preference — see the next section. It is displayed
-because a reading a few minutes old otherwise looks like a stuck app rather than a deliberate choice,
-and the explanatory text changes to say so explicitly once the app has been throttled.
+**Refresh sets a target, not a guarantee.** Choosing a cadence takes effect at once — the app does not
+wait out the interval already in flight — and it clears whatever interval the app had learned, so a
+cadence a rate limit widened yesterday is not still in force after you have asked for a faster one.
+What it cannot do is overrule the endpoint: a 429 still widens the interval past your setting, and the
+app works back down to it. Whenever the two differ, a `Currently` row shows what the app is actually
+polling at and the text below says why. See the section on the cadence for the rest.
 
 **Alerts request permission only when you switch the toggle on.** That is the app's only
 authorisation request, so a default install never raises a system permission prompt. If the request
@@ -409,30 +423,37 @@ There is nothing to back off from, so the app keeps its normal cadence and stays
 panel-open refresh — which is how a token Claude Code has just rotated gets picked up immediately.
 An expired token is a certain rejection, so the app does not spend a request on it.
 
-## The refresh cadence, and why you cannot set it
+## The refresh cadence, and what setting it actually does
 
-The cadence is not a preference because it is not a matter of taste. The usage endpoint is
-rate-limited per account, and that budget is shared with Claude Code itself, so ClaudeMeter cannot
-know how much of it is already spent. What it can do is find out what the endpoint will tolerate and
-stay there.
+You choose the pace; the endpoint gets the last word. The usage endpoint is rate-limited per account,
+and that budget is shared with Claude Code itself, so ClaudeMeter cannot know how much of it is
+already spent. Your setting is where it aims, and the adaptive machinery around it stays in place.
 
-- It starts at three minutes — deliberately slower than the endpoint strictly needs. Starting slow
+- The default is three minutes — deliberately slower than the endpoint strictly needs. Starting slow
   and earning speed costs a little freshness and avoids teaching the limiter that this app is a
   problem.
 - A 429 doubles the interval and the new value is written to defaults, so a limit discovered today is
-  still respected after a relaunch rather than rediscovered tomorrow.
-- After twelve consecutive clean polls the interval gives back a fifth of itself, down to a floor of
-  ninety seconds. Quick to retreat, slow to advance: that asymmetry is what keeps the cadence from
+  still respected after a relaunch rather than rediscovered tomorrow. It doubles past your setting if
+  it has to: a setting is not a claim on somebody else's budget.
+- After twelve consecutive clean polls the interval gives back a fifth of itself, down to the cadence
+  you asked for. Quick to retreat, slow to advance: that asymmetry is what keeps the cadence from
   oscillating in and out of the limit.
-- The ceiling is fifteen minutes, so the app never stops being a live meter.
+- Ninety seconds is the fastest you can ask for, and the ceiling is fifteen minutes either way, so
+  the app never stops being a live meter. Faster than ninety seconds is not on offer because it does
+  not pay: a refusal costs minutes, which is slower than anything in the list.
+- Choosing a cadence applies immediately and drops the interval the app had learned. Going slower
+  that is obvious; going faster it means a backoff from an earlier 429 is forgiven, which is the point
+  — a limit hit hours ago is a guess about a shared budget, not a fact about now. The first poll after
+  a change is timed from your last reading, so changing the setting does not itself spend a request.
 - A `Retry-After` that carries a usable value outranks the app's own backoff, but is capped at an
   hour — a header asking for a day would otherwise park the app until it was relaunched.
 - Transport failures back off exponentially from the current cadence, capped at five minutes. The
   first step is the current cadence, so a network blip never retries faster than the pace the app has
   settled on.
 
-Settings shows the current value, and its explanatory text changes once a 429 has pushed the cadence
-past its starting point, so a slow refresh reads as a deliberate choice rather than a hang.
+Settings shows the cadence you chose, adds the effective one beside it once a 429 has pushed the two
+apart, and changes its explanatory text to match — so a slow refresh reads as a deliberate choice
+rather than a hang or a setting being ignored.
 
 The transcript rescan is separate from all of this. It is checked after every poll attempt and runs
 once five minutes have passed since the last scan, so poll failures do not hold it up. Passes after
@@ -495,12 +516,13 @@ say they are reading transcripts while it runs. Later passes are incremental and
 | `~/Library/Application Support/ClaudeMeter/last-snapshot.json` | Last successful reading, so a cold start has something to show. |
 | `~/Library/Application Support/ClaudeMeter/events.json` | Deduplicated transcript events, so a cold start does not re-read the whole corpus. |
 | `~/Library/Application Support/ClaudeMeter/scan-state.json` | Per-transcript byte offsets, a cumulative row count per file, and a format version. |
-| App user defaults | Every setting, the collapsed/expanded state of the panel sections, the learned poll cadence, and which windows have already alerted. |
+| App user defaults | Every setting, the collapsed/expanded state of the panel sections, the chosen and learned poll cadences, and which windows have already alerted. |
 
 Deleting these is safe. The app rebuilds the event cache from the transcripts on its next scan and
 loses its poll history, so projections read `estimated` again until the series refills.
 
-Deleting them does not reset the refresh cadence. The learned interval is not in this directory: it
-lives in this app's user defaults under `pollIntervalSeconds`, so a cadence a 429 has widened survives
-both a relaunch and a clean-out of the files above, and comes back down only as the app earns it back.
-Resetting it means clearing that key from the app's defaults domain.
+Deleting them does not reset the refresh cadence. Neither interval is in this directory: the one you
+chose lives in this app's user defaults under `preferredPollIntervalSeconds` and the learned one under
+`pollIntervalSeconds`, so a cadence a 429 has widened survives both a relaunch and a clean-out of the
+files above, and comes back down as the app earns it back — or at once, if you pick a cadence in
+Settings. Resetting it by hand means clearing those keys from the app's defaults domain.

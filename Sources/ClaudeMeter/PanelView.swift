@@ -80,24 +80,6 @@ struct PanelView: View {
             + horizontalPadding * 2 + scrollerAllowance
     }
 
-    /// Whether growing to the wide form would make AppKit re-anchor the panel.
-    ///
-    /// The panel's *leading* edge is pinned to the status item while the panel still fits to the
-    /// right of it, and AppKit flips to trailing-edge anchoring the moment it does not — moving
-    /// the window by its whole width in one frame, with no clamping to the screen. Measured
-    /// stepping a panel from 320 to 1400 under a status item at x=668 on a 1792pt screen: x held
-    /// at 668 up to a width of 1104, then jumped to −435 at 1134.
-    ///
-    /// Nothing can smooth that, so when the two widths straddle the threshold the switch is left
-    /// instant. One jump reads as a resize; a glide that ends in a jump reads as a fault.
-    private static var reanchorsBetweenWidths: Bool {
-        guard let statusItem = NSApp.windows.first(where: { $0.level == .statusBar }),
-            let screen = statusItem.screen ?? NSScreen.main
-        else { return false }
-        let room = screen.frame.maxX - statusItem.frame.minX
-        return (narrowWidth <= room) != (wideWidth <= room)
-    }
-
     /// Natural height of the content, measured rather than assumed.
     ///
     /// The root `ScrollView` is why this is needed. Asked for its size with no height proposed —
@@ -151,12 +133,15 @@ struct PanelView: View {
             PanelSize(
                 width: isWide ? Self.wideWidth : Self.narrowWidth,
                 height: contentHeight > 0 ? min(contentHeight, maximumHeight) : 0))
+        // Growing the window is only half of the two-column switch when the panel is far enough
+        // right that it cannot grow rightward. The other half is moving it, which AppKit does in
+        // one jump of nearly the whole width — so the placement is taken over here and made
+        // continuous, and the panel expands leftward instead. See `PanelAnchor`.
+        .background(PanelAnchor().frame(width: 0, height: 0))
         .onPreferenceChange(ContentHeightKey.self) { height in
             contentHeight = height
         }
-        .animation(
-            Self.reanchorsBetweenWidths ? nil : PanelSection<EmptyView>.toggle,
-            value: isWide)
+        .animation(PanelSection<EmptyView>.toggle, value: isWide)
         .animation(PanelSection<EmptyView>.toggle, value: contentHeight)
         .task { await model.refreshNow() }
         .task { await tick() }
@@ -579,6 +564,17 @@ struct PanelView: View {
 
             Spacer(minLength: 0)
 
+            // Forces both halves: the poll for the meters and a rescan for everything below them.
+            Button {
+                Task { await model.refresh(force: true) }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!model.canRefreshNow)
+            .help(refreshHelp)
+            .keyboardShortcut("r", modifiers: .command)
+
             // Not `SettingsLink`: the `Settings` scene it opens is unreliable in an accessory
             // app. See `SettingsWindowController`.
             Button {
@@ -595,6 +591,19 @@ struct PanelView: View {
                 .font(.caption)
                 .keyboardShortcut("q", modifiers: .command)
         }
+    }
+
+    /// Says which of the three states the button is in, because two of them make it do nothing.
+    /// The deferral one re-reads on the panel's own tick, so the button comes back within a few
+    /// seconds of the gate elapsing rather than on the next poll.
+    private var refreshHelp: String {
+        if model.isPolling { return "Checking…" }
+        if let next = model.nextAttemptAt {
+            return "The last poll failed, so the next attempt is held until "
+                + "\(MenuBarLabelText.compactDuration(until: next, now: now)) from now. Asking "
+                + "again inside that window spends a request the server has already refused."
+        }
+        return "Check the limits and rescan the transcripts now (⌘R)"
     }
 
     /// Seconds granularity, unlike `UsageNumberFormat.ago`: at a 60-second cadence "Updated now"

@@ -28,6 +28,9 @@ import UsageCore
     public private(set) var usageHours: UsageHours?
     public private(set) var samples: [Sample] = []
     public private(set) var isScanning = false
+    /// True while a request is in flight, so the reload button can show that the press landed.
+    /// Separate from `isScanning`: they are two different pieces of work with two different costs.
+    public private(set) var isPolling = false
     public private(set) var lastUpdate: Date?
     /// Transcript rows read per distinct request — normally well above 1.0. Nil until a
     /// scan has completed; shown in settings to explain why these numbers are lower than a
@@ -40,14 +43,16 @@ import UsageCore
 
     // MARK: Tuning
 
-    /// Where a first run starts, before anything has been learned.
+    /// Where a first run starts, before anything has been learned and before the user has said
+    /// otherwise.
     ///
     /// Deliberately slower than the endpoint strictly needs. The budget is per account and shared
     /// with Claude Code itself, so the app cannot know how much of it is already spent; starting
     /// slow and earning speed costs a little freshness and avoids teaching the limiter that we are
     /// a problem. Four samples at this rate still clear `ProjectionEngine`'s 10-minute minimum.
     public static let defaultPollInterval = Prefs.defaultPollInterval
-    /// Never poll faster than this, however well things are going.
+    /// Never poll faster than this, however well things are going and whatever is asked for — it is
+    /// also the fastest cadence the Refresh picker offers.
     public static let minimumPollInterval = Prefs.minimumPollInterval
     /// Never slower than this, or the app stops being a live meter.
     public static let maximumPollInterval = Prefs.maximumPollInterval
@@ -112,7 +117,34 @@ import UsageCore
         hasStarted = true
         loadPersistedState(now: Date())
         startScan()
-        pollTask = Task { [weak self] in await self?.runPollLoop() }
+        pollTask = Task { [weak self] in await self?.runPollLoop(after: 0) }
+    }
+
+    /// Restarts the loop so a new cadence takes effect now instead of after the sleep already in
+    /// flight — at the slow end of the range that would be a quarter of an hour of the setting
+    /// appearing to do nothing.
+    ///
+    /// The first poll of the new loop is timed from the last reading, so changing the setting is
+    /// not itself a reason to spend a request, and never lands inside a backoff or a `Retry-After`
+    /// the app has already committed to. A poll still in flight is not cancelled: the restarted
+    /// loop coalesces onto it the same way a panel-open refresh does.
+    private func restartPollLoop() {
+        pollTask?.cancel()
+        let delay = delayBeforeNextPoll(now: Date())
+        pollTask = Task { [weak self] in await self?.runPollLoop(after: delay) }
+    }
+
+    /// How long the restarted loop waits before its first request: enough to keep the new cadence
+    /// relative to the last reading, and at least as long as any gate a failure has armed.
+    private func delayBeforeNextPoll(now: Date) -> TimeInterval {
+        var delay: TimeInterval = 0
+        if let lastUpdate {
+            delay = pollInterval - now.timeIntervalSince(lastUpdate)
+        }
+        if let nextAttemptNotBefore {
+            delay = max(delay, nextAttemptNotBefore.timeIntervalSince(now))
+        }
+        return max(0, delay)
     }
 
     /// Refreshes only if the last successful poll has gone stale, which is the panel-open
@@ -121,7 +153,14 @@ import UsageCore
         await refresh(force: false)
     }
 
-    /// `force` skips the staleness gate — for an explicit user-initiated refresh.
+    /// `force` skips the staleness gate — for an explicit user-initiated refresh — and takes the
+    /// transcript scan with it, since somebody who asked for fresh numbers means all of them and
+    /// the panel's statistics come from the scan rather than the poll.
+    ///
+    /// It does not skip the deferral gate below, which is the difference between "the user is
+    /// impatient" and "the app has already decided not to make this request". `canRefreshNow`
+    /// reports that, so the button offering this can be disabled rather than silently doing
+    /// nothing.
     public func refresh(force: Bool) async {
         guard hasStarted else {
             start()
@@ -132,13 +171,21 @@ import UsageCore
             if let lastUpdate, now.timeIntervalSince(lastUpdate) < panelStaleInterval {
                 return
             }
-            // A failing poll leaves `lastUpdate` frozen, so the gate above stops holding and
-            // every panel open would issue a request the backoff (or the server's own
-            // `Retry-After`) has explicitly deferred.
-            if let nextAttemptNotBefore, now < nextAttemptNotBefore { return }
         }
+        // A failing poll leaves `lastUpdate` frozen, so the staleness gate stops holding and every
+        // panel open — or every press of the reload button — would issue a request the backoff, or
+        // the server's own `Retry-After`, has explicitly deferred. A refused request is not free:
+        // it widens the cadence for everything else.
+        if let nextAttemptNotBefore, now < nextAttemptNotBefore { return }
+
         _ = await performPoll()
-        maybeRescan(now: Date())
+        if force { startScan() } else { maybeRescan(now: Date()) }
+    }
+
+    /// Whether an explicit refresh would actually do anything: nothing already in flight, and no
+    /// deferral armed by a failed poll still standing.
+    public var canRefreshNow: Bool {
+        !isPolling && nextAttemptAt == nil
     }
 
     public func quit() {
@@ -165,14 +212,17 @@ import UsageCore
     /// Today's bucket from the 30-day series, for the stats grid.
     public var today: DailyStat? { daily.last }
 
-    /// The cadence the app has settled on, in seconds. Starts at `defaultPollInterval`, widens on
-    /// a 429, narrows again after a sustained clean run, and persists across launches so a limit
-    /// learned today is not rediscovered tomorrow.
-    public private(set) var pollInterval: TimeInterval = Prefs.pollInterval()
+    /// The cadence the app is actually polling at, in seconds. Starts at whichever is slower of the
+    /// user's setting and the interval last learned, widens on a 429, narrows after a sustained
+    /// clean run down to the setting, and persists across launches so a limit learned today is not
+    /// rediscovered tomorrow.
+    public private(set) var pollInterval: TimeInterval = Prefs.effectivePollInterval()
 
-    /// True once a 429 has pushed the cadence past its starting point, so the UI can say the
-    /// refresh rate was reduced deliberately rather than looking broken.
-    public var isThrottled: Bool { pollInterval > Self.defaultPollInterval }
+    /// True once a 429 has pushed the cadence past the pace the user asked for, so the UI can say
+    /// the refresh rate was reduced deliberately rather than looking broken.
+    public var isThrottled: Bool {
+        pollInterval > Prefs.Current.preferredPollInterval() + 0.5
+    }
 
     public var isStale: Bool {
         guard let lastUpdate else { return true }
@@ -276,7 +326,11 @@ import UsageCore
 
     // MARK: - Polling
 
-    private func runPollLoop() async {
+    /// `initialDelay` is for a loop restarted mid-flight; a loop started at launch polls at once.
+    private func runPollLoop(after initialDelay: TimeInterval) async {
+        if initialDelay > 0 {
+            do { try await Task.sleep(for: .seconds(initialDelay)) } catch { return }
+        }
         while !Task.isCancelled {
             let delay = await performPoll()
             maybeRescan(now: Date())
@@ -298,8 +352,10 @@ import UsageCore
             return await self.pollOnce(now: Date())
         }
         pollInFlight = task
+        isPolling = true
         let delay = await task.value
         pollInFlight = nil
+        isPolling = false
         return delay
     }
 
@@ -422,24 +478,48 @@ import UsageCore
 
     /// Widen the interval and remember it. Called on a 429 — the one unambiguous signal that the
     /// current pace is too fast. Multiplicative so a persistent limit is escaped in a few steps
-    /// rather than crawled away from.
+    /// rather than crawled away from. Outranks the user's setting, which is why that setting is a
+    /// target and not a guarantee: the account's budget is not ours alone to spend.
     private func slowDown() {
         cleanPolls = 0
         let widened = min(pollInterval * Self.slowdownFactor, Self.maximumPollInterval)
         guard widened > pollInterval else { return }
         pollInterval = widened
-        Prefs.setPollInterval(widened)
+        Prefs.setLearnedPollInterval(widened)
     }
 
     /// Give a little of the interval back after a sustained clean run, so a cadence widened during
-    /// a busy hour does not stay slow forever. Never goes below `minimumPollInterval`.
+    /// a busy hour does not stay slow forever. Stops at the pace the user asked for rather than at
+    /// the app's own floor — a cadence nobody asked to be fast has no reason to keep accelerating.
     private func noteCleanPoll() {
-        guard pollInterval > Self.minimumPollInterval else { return }
+        let target = Prefs.Current.preferredPollInterval()
+        guard pollInterval > target else { return }
         cleanPolls += 1
         guard cleanPolls >= Self.successesBeforeSpeedup else { return }
         cleanPolls = 0
-        pollInterval = max(pollInterval * Self.speedupFactor, Self.minimumPollInterval)
-        Prefs.setPollInterval(pollInterval)
+        pollInterval = max(pollInterval * Self.speedupFactor, target)
+        Prefs.setLearnedPollInterval(pollInterval)
+    }
+
+    /// Adopts the cadence the user has just chosen in settings.
+    ///
+    /// The choice supersedes what the app had learned, in both directions. Downwards that is
+    /// obvious. Upwards it means dropping a backoff a 429 taught the app, which is deliberate: the
+    /// learned value is a guess about a shared budget that may be hours stale, and a setting that
+    /// visibly does nothing is worse than one refused request. If the endpoint still objects, the
+    /// next 429 widens it again from here — and `isThrottled` says so in the place the setting was
+    /// changed.
+    public func applyPreferredPollInterval() {
+        let chosen = Prefs.Current.preferredPollInterval()
+        // Returning early is safe even though the target itself moved: the loop is already sleeping
+        // for the interval being asked for, and `noteCleanPoll` reads the target live rather than
+        // from anything cached here.
+        guard chosen != pollInterval else { return }
+        cleanPolls = 0
+        pollInterval = chosen
+        Prefs.setLearnedPollInterval(chosen)
+        guard hasStarted else { return }
+        restartPollLoop()
     }
 
     /// First rung is the current cadence, so a transport blip never retries faster than the pace

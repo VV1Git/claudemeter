@@ -56,15 +56,17 @@ breakdown is open, since that section alone is taller than a single column can s
   count; and a 30-day daily token chart followed by model, effort, token-side and cost-side splits.
 - A stats grid: today's tokens in and out, sessions started today, today's cost equivalent, and then
   cache hit ratio, wall-clock hours and agent-hours over everything recorded.
-- A footer with the age of the last reading, a settings button, and quit.
+- A footer with the age of the last reading, a refresh button, a settings button, and quit. Refresh
+  forces both a poll and a transcript rescan, and is disabled — rather than silently ignored — while
+  a failed poll's backoff is still standing.
 
 ### Settings
 
 Menu bar format; the idle gap that separates one stretch of work from the next (5 to 30 minutes,
-default 10) with a live wall-clock readout; a read-only display of the current poll cadence and why
-it is what it is; the notification toggle and threshold (50% to 99%, default 90); launch at login
-via `SMAppService`; and a footer naming the support directory and restating that the OAuth token is
-read but never written.
+default 10) with a live wall-clock readout; the poll cadence to aim for (90 s to 15 min, default 3
+min) alongside the effective one whenever a rate limit has widened it; the notification toggle and
+threshold (50% to 99%, default 90); launch at login via `SMAppService`; and a footer naming the
+support directory and restating that the OAuth token is read but never written.
 
 ## Requirements
 
@@ -242,6 +244,8 @@ Sources/ClaudeMeter/          SwiftUI, AppKit, Charts
   Prefs.swift                 every UserDefaults key and default, in one place
   MenuBarIcon.swift           the ring, rasterised and memoised
   PanelView.swift             the panel; owns the sections and the stats grid
+  PanelSection.swift          one collapsible section, and the animatable panel size
+  PanelAnchor.swift           keeps the panel on screen as it resizes
   MeterRow.swift              one limit window: bar, reset line, projection line
   SparklineView.swift         utilization over the current window, with the forecast
   DailyBarsView.swift         tokens per day
@@ -323,40 +327,86 @@ automatic answer is usable: left alone, `NSHostingController` reported a 28-poin
 grouped `Form` — a title bar and nothing else — while `preferredContentSize` reported the form's
 full expanded height, close to a whole screen.
 
-### The poll cadence tunes itself, and is not a preference
+### The panel's own position is computed, because AppKit's has a cliff in it
+
+AppKit gives a menu bar panel two placements and no path between them. The leading edge sits at the
+status item while the panel still fits to the right of it; the moment it does not, the *trailing*
+edge goes to the status item's trailing edge instead. The two-column switch changes the panel's
+width, so a status item far enough right puts that switch across the boundary — and the panel then
+moves by nearly its own width in a single frame. Measured with the item at x=686 on a 1792-point
+screen, stepping the width up: x held at 686 through a width of 1100, then went to −388 at 1120, the
+leading edge off the screen entirely, since nothing clamps it.
+
+`PanelAnchor` substitutes one continuous rule for the pair: leading edge at the status item while
+that fits, and past that a trailing edge held eight points inside the screen, so further width moves
+the leading edge left and the panel expands leftward rather than jumping. Depending only on the
+current width — the value SwiftUI is animating already — means there is no threshold in it to jump
+at, and the sideways glide falls out of the same animation as the resize.
+
+It corrects AppKit's placement rather than replacing it, which is the only order on offer: the
+hosting view resizes the window from the layout pass, AppKit re-anchors after that, and both arrive
+as notifications. Correcting from them does not flicker, because window geometry is committed once
+per turn of the run loop rather than per call. While the frame went 684 → 664 → −388 → 664
+in-process across one resize, the window server held the *previous* frame throughout and then took
+only the last value, so AppKit's off-screen intermediate is never drawn.
+
+### The poll cadence is a target, and the endpoint gets the last word
 
 The usage endpoint is rate-limited per account and that budget is shared with Claude Code itself, so
-the app cannot know how much of it is already spent. It starts deliberately slower than the endpoint
-strictly needs, then earns speed:
+the app cannot know how much of it is already spent. Settings picks the pace to aim for; what the app
+does with that is still adaptive:
 
 | Behaviour            | Value |
 | -------------------- | ----- |
-| Starting interval    | 180 s |
-| Floor                | 90 s  |
+| Chosen interval      | 90 s, 2, 3, 5, 10 or 15 min (default 3 min) |
+| Starting interval    | the chosen one, or a wider one already learned |
+| Floor                | the chosen interval — never below 90 s |
 | Ceiling              | 15 min |
-| On a 429             | interval × 2, remembered |
-| After 12 clean polls | interval × 0.8, down to the floor |
+| On a 429             | interval × 2, remembered, past the chosen value if need be |
+| After 12 clean polls | interval × 0.8, down to the chosen value |
 
-Both directions are multiplicative — doubling on refusal, giving back a fifth after a clean run —
-so it is quick to retreat and slow to advance, which is what
-stops it oscillating in and out of the limit. The learned interval is persisted, so a limit
-discovered today is not rediscovered tomorrow, and it is clamped on read so a value written by an
-older build or a hand-edited plist cannot make the app poll in a hot loop or stop polling
-altogether. Settings shows the current cadence read-only, with an explanation, because a reading a
-few minutes old otherwise looks like a stuck app rather than a deliberate choice.
+Both directions are multiplicative — doubling on refusal, giving back a fifth after a clean run — so
+it is quick to retreat and slow to advance, which is what stops it oscillating in and out of the
+limit. The learned interval is persisted separately from the choice, so a limit discovered today is
+not rediscovered tomorrow, and both are clamped on read so a value written by an older build or a
+hand-edited plist cannot make the app poll in a hot loop or stop polling altogether.
+
+Two decisions in that table are worth stating outright:
+
+- **A 429 outranks the setting.** The setting is what the app aims for, not a promise it can keep,
+  because the budget is not the app's alone to spend. When the two disagree, Settings shows the
+  effective cadence on a second row and says why — without it a throttled app looks like one
+  ignoring its own setting, which is the same confusion the old read-only display existed to avoid.
+- **Choosing a cadence discards what was learned, in both directions.** Downwards that is obvious.
+  Upwards it means dropping a backoff a 429 taught the app, which is deliberate: the learned value is
+  a guess about a shared budget that may be hours stale, and a setting that visibly does nothing is
+  worse than one refused request. If the endpoint still objects, the next 429 widens it again from
+  there.
+
+Changing the setting also re-times the loop rather than waiting out the sleep already in flight — at
+the slow end that would be a quarter of an hour of the setting appearing to do nothing. The first
+poll after a change is timed from the last reading, so changing the setting is not itself a reason to
+spend a request, and it never lands inside a backoff or a `Retry-After` already committed to.
+
+90 seconds is the fastest on offer because it is the fastest the app has ever polled. Freshness
+bought with refusals is not freshness: a 429 widens the interval to several minutes, which is slower
+than every setting in the list.
 
 Several details fall out of this:
 
 - Opening the panel refreshes only if the last successful poll has gone stale, where stale means 0.9
   × the current interval. A fixed gate does not track the cadence: at 20
   seconds it fired on nearly every open, spending a request to re-fetch what the loop had just
-  refreshed.
+  refreshed. The footer's refresh button is the deliberate way past that gate, and it forces a
+  transcript rescan along with the poll, since the statistics below the meters come from the scan.
 - A failing poll freezes the "last update" timestamp, so the staleness gate alone stops holding and
   every panel presentation would fire another request that the backoff or an honoured `Retry-After`
-  had explicitly deferred. A separate "not before" gate exists for exactly that.
-- Concurrent callers are coalesced onto one request. The loop and a panel-open refresh can arrive
-  together, and two simultaneous polls would append two samples a millisecond apart, which the
-  burn-rate fit reads as an infinite slope.
+  had explicitly deferred. A separate "not before" gate exists for exactly that, and the refresh
+  button honours it too — being disabled while it stands, rather than pressable and inert, because a
+  request the server has already refused costs the cadence for everything else.
+- Concurrent callers are coalesced onto one request. The loop, a panel-open refresh and the button
+  can arrive together, and two simultaneous polls would append two samples a millisecond apart, which
+  the burn-rate fit reads as an infinite slope.
 - The transport backoff's first rung is the current cadence, not one second, so a network blip never
   retries faster than the pace the app has settled on. It caps at 300 seconds.
 - `Retry-After` is honoured as sent but bounded to an hour, because a header asking for a day would
