@@ -150,6 +150,19 @@ struct PanelView: View {
                         subLabel("Effort · all recorded")
                         ShareRowsView(rows: effortRows)
                     }
+                    if !tokenRows.isEmpty {
+                        subLabel("Tokens · all recorded")
+                        ShareRowsView(rows: tokenRows)
+                        // Without this the split invites the wrong conclusion. Cache reads
+                        // dominate the token count but bill at a tenth of the input rate, while
+                        // output is a rounding error by volume and bills at five times it — so
+                        // the two orderings barely resemble each other.
+                        note("Output is a small share of tokens and a large share of cost.")
+                    }
+                    if !costRows.isEmpty {
+                        subLabel("Cost share · all recorded")
+                        ShareRowsView(rows: costRows)
+                    }
                 }
                 .padding(.top, 4)
             } label: {
@@ -184,6 +197,68 @@ struct PanelView: View {
         }
     }
 
+    /// Every token the corpus touched, split by which side of the request it was on. `cacheCreate`
+    /// is the total, so it is *not* added to the 5m/1h split — that would count those tokens twice.
+    private var tokenTotals: TokenCounts {
+        model.models.reduce(TokenCounts.zero) { $0 + $1.tokens }
+    }
+
+    /// Fractioned by token count, which is what the label promises. Compare with `costRows`.
+    private var tokenRows: [ShareRow] {
+        let tokens = tokenTotals
+        let total = tokens.total
+        guard total > 0 else { return [] }
+        return [
+            ("Input", tokens.input),
+            ("Cache read", tokens.cacheRead),
+            ("Cache write", tokens.cacheCreate),
+            ("Output", tokens.output),
+        ]
+        .filter { $0.1 > 0 }
+        .map { name, value in
+            ShareRow(
+                id: "tok-\(name)",
+                label: name,
+                detail: UsageNumberFormat.tokens(value),
+                fraction: Double(value) / Double(total))
+        }
+    }
+
+    /// The same four fields priced. Summed per model, because the per-field rate is a multiple of
+    /// that model's input rate — pricing the pooled totals at one blended rate would be wrong.
+    private var costRows: [ShareRow] {
+        let now = Date()
+        var byField: [String: Double] = [:]
+        for usage in model.models {
+            let tokens = usage.tokens
+            let priced: [(String, TokenCounts)] = [
+                ("Input", TokenCounts(input: tokens.input)),
+                ("Cache read", TokenCounts(cacheRead: tokens.cacheRead)),
+                (
+                    "Cache write",
+                    TokenCounts(
+                        cacheCreate: tokens.cacheCreate,
+                        cacheCreate5m: tokens.cacheCreate5m,
+                        cacheCreate1h: tokens.cacheCreate1h)
+                ),
+                ("Output", TokenCounts(output: tokens.output)),
+            ]
+            for (name, counts) in priced {
+                byField[name, default: 0] += Pricing.cost(counts, model: usage.model, on: now)
+            }
+        }
+        let total = byField.values.reduce(0, +)
+        guard total > 0 else { return [] }
+        return ["Input", "Cache read", "Cache write", "Output"].compactMap { name in
+            guard let value = byField[name], value > 0 else { return nil }
+            return ShareRow(
+                id: "cost-\(name)",
+                label: name,
+                detail: UsageNumberFormat.cost(value),
+                fraction: value / total)
+        }
+    }
+
     // MARK: Stats
 
     /// Never greyed with the health notice: these come from the local transcripts, so a failed
@@ -193,10 +268,22 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 6) {
                     sectionLabel("Today")
-                    grid {
+                    grid(columns: 2) {
                         StatTile(
-                            label: "Tokens",
-                            value: UsageNumberFormat.tokens(model.today?.tokens.total ?? 0))
+                            label: "Tokens in",
+                            value: UsageNumberFormat.tokens(
+                                (model.today?.tokens).map {
+                                    $0.input + $0.cacheRead + $0.cacheCreate
+                                } ?? 0),
+                            help: "Everything sent: fresh input plus cache reads and cache writes. "
+                                + "Cache reads usually dominate and bill at a tenth of the input "
+                                + "rate.")
+                        StatTile(
+                            label: "Tokens out",
+                            value: UsageNumberFormat.tokens(model.today?.tokens.output ?? 0),
+                            help: "Generated tokens. A small fraction of the volume and a large "
+                                + "fraction of the cost — output bills at five times the input "
+                                + "rate.")
                         StatTile(
                             label: "Sessions",
                             value: "\(sessionsToday)",
@@ -238,10 +325,15 @@ struct PanelView: View {
         }
     }
 
-    private func grid<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+    /// `columns` is explicit because tile counts differ per grid, and a count that does not divide
+    /// the tiles leaves a ragged last row on a panel this narrow.
+    private func grid<Content: View>(
+        columns: Int = 3, @ViewBuilder _ content: () -> Content
+    ) -> some View {
         LazyVGrid(
             columns: Array(
-                repeating: GridItem(.flexible(), spacing: 8, alignment: .topLeading), count: 3),
+                repeating: GridItem(.flexible(), spacing: 8, alignment: .topLeading),
+                count: max(1, columns)),
             alignment: .leading, spacing: 8
         ) {
             content()

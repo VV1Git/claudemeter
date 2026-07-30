@@ -62,7 +62,11 @@ struct SessionsSection: View {
                 dot
                 Text(UsageNumberFormat.messages(session.messageCount))
                 dot
-                Text("\(UsageNumberFormat.tokens(session.tokens.total)) tok")
+                // Input side and output separately rather than one total: they differ by orders of
+                // magnitude and price differently, so a single figure hides which one moved.
+                Text("\(UsageNumberFormat.tokens(inputSide(session.tokens))) in")
+                dot
+                Text("\(UsageNumberFormat.tokens(session.tokens.output)) out")
                 Spacer(minLength: 4)
                 Text(UsageNumberFormat.cost(session.costEquivalent))
                     .help("Equivalent cost at published API rates — subscription usage is not billed per token.")
@@ -81,13 +85,20 @@ struct SessionsSection: View {
             .foregroundStyle(.tertiary)
     }
 
+    /// Everything on the request side of the exchange: fresh input plus both halves of the cache.
+    /// Output is excluded because it is generated, not sent.
+    private func inputSide(_ tokens: TokenCounts) -> Int {
+        tokens.input + tokens.cacheRead + tokens.cacheCreate
+    }
+
     private func spokenSummary(_ session: SessionStat) -> String {
         let parts = [
             session.projectName,
             "started \(UsageNumberFormat.ago(session.start, from: now))",
             "ran \(UsageNumberFormat.compactDuration(session.duration))",
             UsageNumberFormat.messages(session.messageCount),
-            "\(UsageNumberFormat.tokens(session.tokens.total)) tokens",
+            "\(UsageNumberFormat.tokens(inputSide(session.tokens))) input tokens",
+            "\(UsageNumberFormat.tokens(session.tokens.output)) output tokens",
             "\(UsageNumberFormat.cost(session.costEquivalent)) equivalent",
         ]
         return parts.joined(separator: ", ")
