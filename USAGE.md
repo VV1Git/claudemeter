@@ -77,9 +77,16 @@ The ring carries an accessibility description of the form `Claude 5-hour usage 4
 
 ## Reading the panel
 
-Click the menu bar item to open the panel. It is a single fixed-width column and does not scroll:
-anything that could grow without bound lives inside a collapsible section, and the sections remember
-whether you left them open, so the panel reopens at the height you last used.
+Click the menu bar item to open the panel. Closed, it is a single narrow column. Opening the
+`Last 30 days` breakdown — or any two of the other sections — switches it to two columns, with that
+breakdown in the right-hand one. It carries the daily chart and four proportion groups, so in a
+single column it runs past the bottom of the screen, and a menu bar panel has nowhere to overflow
+to: it is simply clipped, and the footer becomes unreachable.
+
+The panel will also never exceed the height of the screen it hangs from. If the content still does
+not fit — a long session list on a short display — it scrolls, and only then; a panel that fits
+shows no scroll affordance. The sections remember whether you left them open, so it reopens in the
+shape you last used.
 
 Opening the panel refreshes the limits only if the last successful poll has gone stale, where stale
 means older than nine tenths of the current cadence. Opening it twice in quick succession does not

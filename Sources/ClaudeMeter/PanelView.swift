@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UsageCore
 
@@ -5,9 +6,19 @@ import UsageCore
 
 /// The whole menu bar panel: two meters, three collapsible sections, a stats grid, a footer.
 ///
-/// One fixed-width column with no scroll view — everything that can grow without bound lives
-/// inside a disclosure section, and the sections remember their state across launches so the panel
-/// reopens at the height the user left it at.
+/// Narrow and single-column while the sections are closed. Expanded, it lays out in two columns
+/// and gains a height cap.
+///
+/// The reason is that one section is far taller than the others: "Last 30 days" carries the daily
+/// chart *and* four proportion groups (models, effort, tokens, cost share). Stacked in one 320pt
+/// column that overruns the bottom of the screen, and a menu bar panel has nowhere to overflow to —
+/// it is simply clipped, so the footer and part of the content become unreachable. Widening alone
+/// does not fix it either; the tall section has to get a column of its own, which is why the split
+/// below is by content weight rather than by source order.
+///
+/// The cap and scroll view are the guarantee rather than the mechanism: whatever the section
+/// contents grow into — a long session list, a small display — the panel still cannot exceed the
+/// screen.
 struct PanelView: View {
     @Environment(AppModel.self) private var model
 
@@ -21,34 +32,92 @@ struct PanelView: View {
 
     init() {}
 
+    /// One column closed, two open. 300 rather than 320 per column so the two-column form stays
+    /// under a third of a small laptop screen's width.
+    private static let columnWidth: CGFloat = 300
+    private static let columnGap: CGFloat = 16
+
+    /// Widen when the content is about to get tall.
+    ///
+    /// `expandedDaily` alone is enough: that section carries the daily chart and four proportion
+    /// groups, and on its own it overruns a single column. Two of the lighter sections together do
+    /// the same. One light section on its own stays narrow, because a 620pt-wide panel showing a
+    /// single sparkline looks like a mistake.
+    private var isWide: Bool {
+        let openLightSections = [expandedFiveHour, expandedSessions].filter { $0 }.count
+        return expandedDaily || openLightSections >= 2
+    }
+
+    private var panelWidth: CGFloat {
+        isWide ? Self.columnWidth * 2 + Self.columnGap : 320
+    }
+
+    /// Never taller than the screen it is hanging from. Read at layout time rather than cached,
+    /// since the panel can be opened after the display arrangement has changed.
+    private var maximumHeight: CGFloat {
+        let visible = NSScreen.main?.visibleFrame.height ?? 900
+        return max(400, visible - 48)
+    }
+
     var body: some View {
+        ScrollView(.vertical) {
+            content
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+        }
+        // Only scrolls when it has to, so a closed panel has no idle scroll affordance and does not
+        // rubber-band under the pointer.
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(width: panelWidth)
+        .frame(maxHeight: maximumHeight)
+        .task { await model.refreshNow() }
+        .task { await tick() }
+    }
+
+    @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Full width in both layouts: it explains the state of everything below it.
             if let notice = healthNotice {
                 HealthNotice(notice: notice)
             }
 
-            if showsMeters {
-                meters
+            if isWide {
+                HStack(alignment: .top, spacing: Self.columnGap) {
+                    column { narrowLeadingContent }
+                    Divider()
+                    column { dailySection }
+                }
+            } else {
+                narrowLeadingContent
+                dailySection
             }
-
-            // Not gated on `isLive`. Recent sessions and the 30-day chart are derived from the
-            // local transcripts, so an API outage says nothing about them — they are as live as
-            // ever. Only the sparkline is built from poll samples, and it hides itself when it
-            // has none.
-            Divider()
-            sections
-
-            Divider()
-            stats
 
             Divider()
             footer
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .frame(width: 320)
-        .task { await model.refreshNow() }
-        .task { await tick() }
+    }
+
+    /// Everything except the 30-day breakdown, in the order it reads in one column. In the wide
+    /// layout this is the left column and the breakdown is the right one — the split is by height,
+    /// not by topic, because the breakdown is the only part that grows without bound.
+    @ViewBuilder private var narrowLeadingContent: some View {
+        if showsMeters {
+            meters
+        }
+
+        // Not gated on `isLive`. Recent sessions and the daily chart are derived from the local
+        // transcripts, so an API outage says nothing about them — they are as live as ever. Only
+        // the sparkline is built from poll samples, and it hides itself when it has none.
+        Divider()
+        lightSections
+
+        Divider()
+        stats
+    }
+
+    private func column<Content: View>(@ViewBuilder _ body: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) { body() }
+            .frame(width: Self.columnWidth, alignment: .topLeading)
     }
 
     // MARK: Meters
@@ -104,7 +173,8 @@ struct PanelView: View {
 
     /// Each section's content view owns its own empty state, so this only adds the one thing they
     /// cannot know: that a first transcript scan is still running.
-    @ViewBuilder private var sections: some View {
+    /// The two sections that stay a reasonable height when open, so they travel with the meters.
+    @ViewBuilder private var lightSections: some View {
         VStack(alignment: .leading, spacing: 8) {
             // The samples themselves were real readings, so they stay visible during an outage;
             // the dashed forecast does not, since nobody is measuring the rate any more.
@@ -131,7 +201,13 @@ struct PanelView: View {
             } label: {
                 sectionLabel("Recent sessions (\(model.sessions.count))")
             }
+        }
+    }
 
+    /// Kept separate from the others because it is the one section that can outgrow the screen: a
+    /// month of bars plus four proportion groups. In the wide layout it owns the second column.
+    @ViewBuilder private var dailySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
             DisclosureGroup(isExpanded: $expandedDaily) {
                 VStack(alignment: .leading, spacing: 10) {
                     if model.daily.isEmpty, model.isScanning {

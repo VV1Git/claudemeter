@@ -37,8 +37,9 @@ label that reads `42% → 42%` is noise, not information.
 
 ### Panel
 
-Clicking the item opens a fixed-width window (not an `NSMenu`, because Swift Charts and disclosure
-groups do not render inside one). Top to bottom:
+Clicking the item opens a window (not an `NSMenu`, because Swift Charts and disclosure groups do
+not render inside one). It is one column while the sections are closed and two once the daily
+breakdown is open, since that section alone is taller than a single column can show. Top to bottom:
 
 - A notice when something is wrong: not signed in, token expired, or offline with the reason, when
   the next request is due, and a reminder that the transcript-derived statistics below are
