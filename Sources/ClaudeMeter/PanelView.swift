@@ -401,7 +401,11 @@ struct PanelView: View {
 
             Spacer(minLength: 0)
 
-            SettingsLink {
+            // Not `SettingsLink`: the `Settings` scene it opens is unreliable in an accessory
+            // app. See `SettingsWindowController`.
+            Button {
+                SettingsWindowController.shared.show()
+            } label: {
                 Image(systemName: "gearshape")
             }
             .buttonStyle(.borderless)

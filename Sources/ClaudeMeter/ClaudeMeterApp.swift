@@ -18,10 +18,9 @@ struct ClaudeMeterApp: App {
         // the window style.
         .menuBarExtraStyle(.window)
 
-        Settings {
-            SettingsView()
-                .environment(delegate.model)
-        }
+        // No `Settings` scene: in an accessory app its window opens without reliably coming
+        // forward, so the gear appeared to do nothing much of the time. `SettingsWindowController`
+        // owns an `NSWindow` instead.
     }
 }
 
@@ -37,8 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Seeds the registration domain before anything reads it, so the model's direct
         // `UserDefaults` reads and the views' `@AppStorage` defaults cannot disagree.
         Prefs.registerDefaults()
+        SettingsWindowController.shared.attach(model: model)
         model.start()
     }
+
 }
 
 /// The always-visible menu bar item: rasterised ring plus the text for the chosen format.
