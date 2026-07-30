@@ -77,6 +77,11 @@ struct PanelView: View {
         // visibly. Letting the content own its width removes the chance to get it wrong.
         .frame(width: isWide ? nil : Self.narrowWidth)
         .frame(maxHeight: maximumHeight)
+        // The column switch changes the window's width, and AppKit resizes a menu bar panel in one
+        // step. Animating the change here softens that into a short slide instead of a jump.
+        // Deliberately brief: the same duration as the section toggle that triggered it, so the two
+        // read as one movement rather than a resize chasing a disclosure.
+        .animation(PanelSection<EmptyView>.toggle, value: isWide)
         .task { await model.refreshNow() }
         .task { await tick() }
     }
@@ -186,27 +191,21 @@ struct PanelView: View {
             // The samples themselves were real readings, so they stay visible during an outage;
             // the dashed forecast does not, since nobody is measuring the rate any more.
             if !model.samples.isEmpty {
-                DisclosureGroup(isExpanded: $expandedFiveHour) {
+                PanelSection(title: "Last 5 hours", isExpanded: $expandedFiveHour) {
                     SparklineView(
                         samples: model.samples, kind: .fiveHour,
                         projection: liveProjection(model.fiveHourProjection), now: now)
-                        .padding(.top, 4)
-                } label: {
-                    sectionLabel("Last 5 hours")
                 }
             }
 
-            DisclosureGroup(isExpanded: $expandedSessions) {
-                Group {
-                    if model.sessions.isEmpty, model.isScanning {
-                        note("Reading transcripts…")
-                    } else {
-                        SessionsSection(sessions: model.sessions)
-                    }
+            PanelSection(
+                title: "Recent sessions (\(model.sessions.count))", isExpanded: $expandedSessions
+            ) {
+                if model.sessions.isEmpty, model.isScanning {
+                    note("Reading transcripts…")
+                } else {
+                    SessionsSection(sessions: model.sessions)
                 }
-                .padding(.top, 4)
-            } label: {
-                sectionLabel("Recent sessions (\(model.sessions.count))")
             }
         }
     }
@@ -215,7 +214,7 @@ struct PanelView: View {
     /// month of bars plus four proportion groups. In the wide layout it owns the second column.
     @ViewBuilder private var dailySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            DisclosureGroup(isExpanded: $expandedDaily) {
+            PanelSection(title: "Last 30 days", isExpanded: $expandedDaily) {
                 VStack(alignment: .leading, spacing: 10) {
                     if model.daily.isEmpty, model.isScanning {
                         note("Reading transcripts…")
@@ -247,9 +246,6 @@ struct PanelView: View {
                         ShareRowsView(rows: costRows)
                     }
                 }
-                .padding(.top, 4)
-            } label: {
-                sectionLabel("Last 30 days")
             }
         }
     }

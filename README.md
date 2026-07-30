@@ -107,7 +107,20 @@ concurrently, so in parallel one suite's temp-tree cleanup can delete another's 
 
 ## Where the numbers come from
 
-Two sources, for two different jobs.
+Two sources, for two different jobs — and they do not cover the same thing, which is worth knowing
+before you compare them.
+
+**The two meters are account-wide. The statistics below them are only this machine.** The limit
+percentages come from the usage endpoint, authenticated as the account, and the 5-hour and weekly
+windows are billed per account: everything on the subscription counts toward them, including Claude
+Code on another machine, claude.ai in a browser, the desktop app, and mobile. The endpoint reports no
+device breakdown, so neither can this app. The token counts, sessions, daily chart, model and effort
+splits, cost equivalents and usage hours are all read from local transcript files, which exist only
+for Claude Code and only on the machine that wrote them.
+
+So the meters can sit high while the statistics look quiet, and that is not a bug — it means usage
+came from somewhere this app cannot see. Read the meters as "how much of the limit is gone" and the
+statistics as "what this machine did".
 
 **Limit percentages come from the usage endpoint.** `LimitsClient` issues a single
 `GET https://api.anthropic.com/api/oauth/usage` with an `Authorization: Bearer` header and

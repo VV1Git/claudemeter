@@ -223,6 +223,25 @@ non-zero amount under a cent, which reads `<$0.01`. Subscription
 usage is not billed per token, so none of them is a bill. A model the app has no published rate for
 contributes its tokens to the token splits but nothing to the cost splits.
 
+### What the statistics do and do not cover
+
+The meters and the statistics have different scopes, and it is the first thing that looks wrong when
+it is not.
+
+The **meters are account-wide**. The 5-hour and weekly limits are billed against the whole
+subscription, so anything on the account moves them: Claude Code on another machine, claude.ai in a
+browser, the desktop app, mobile. The endpoint returns no per-device breakdown, so the app cannot
+attribute the usage either.
+
+Everything else — tokens, sessions, the daily chart, the model and effort splits, cost equivalents,
+wall-clock and agent-hours — is read from `~/.claude/projects`, which is written **only by Claude
+Code, and only on this machine**. Work done from a browser, from a phone, or on another Mac never
+appears there.
+
+Which means a high meter over quiet statistics is informative rather than broken: the limit went
+somewhere this app cannot see. If you want the statistics to account for a second machine, there is
+no supported way to do it — the transcripts are local files, and the app does not merge them.
+
 ### The statistics grids
 
 **Today** holds four tiles. `Tokens in` is everything sent — fresh input plus cache reads and cache
