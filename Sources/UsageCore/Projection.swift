@@ -100,7 +100,11 @@ public enum ProjectionEngine {
     /// 95% two-sided normal quantile — the large-sample limit of `confidenceT(df:)`.
     private static let confidenceZ: Double = 1.959_964
     /// Ceiling for the *displayed* projection. `timeToCap` is left unclamped.
-    private static let displayCeiling: Double = 200
+    ///
+    /// Internal rather than private so `Projection.projectedHigh` clamps the top of its
+    /// interval to the same ceiling the centre is clamped to; `private` at type scope is
+    /// file-scoped, and that property lives in `Models.swift`.
+    static let displayCeiling: Double = 200
     private static let syntheticModel = "<synthetic>"
 
     // MARK: Confidence quantile
@@ -127,14 +131,41 @@ public enum ProjectionEngine {
     /// Whether a band still separates "fine" from "you will run out".
     ///
     /// Relative to the headroom rather than absolute. Forty points of uncertainty on a window
-    /// at 5% is noise; the same forty points on a window at 80% is the whole question. The
-    /// floor keeps a nearly-full window from suppressing every band it produces.
+    /// at 5% is noise; the same forty points on a window at 80% is the whole question.
+    ///
+    /// This no longer suppresses anything. It gated a rule that deleted the whole forecast when
+    /// the interval grew past it, which is how both rows came to print a pace and nothing about
+    /// where the window was heading. Both paths now state the interval instead, and this is
+    /// kept as what it always described: whether a band is narrow enough to act on.
     public static func bandIsInformative(_ halfWidth: Double, currentPercent: Double) -> Bool {
         guard halfWidth.isFinite, halfWidth >= 0 else { return false }
         return halfWidth <= max(10, min(maximumBandToShow, (100 - currentPercent) * 0.5))
     }
 
     // MARK: Series selection
+
+    /// The samples a chart of one whole period should plot: those inside `period`, ascending,
+    /// cut at the most recent reset boundary.
+    ///
+    /// Separate from `usableSamples` because the two want different spans — a regression wants
+    /// the trailing 45 minutes, a chart wants the window — but they must agree about where a
+    /// cycle ended, so both segment on `isResetBoundary`.
+    public static func chartSamples(
+        _ samples: [Sample], kind: WindowKind, period: (start: Date, end: Date)
+    ) -> [Sample] {
+        // Two-sided comparison rather than a `ClosedRange.contains`: both comparisons are false
+        // for a NaN-backed timestamp, so a corrupt sample is dropped rather than admitted.
+        let series = samples
+            .filter { $0.t >= period.start && $0.t <= period.end && $0.percent(for: kind) != nil }
+            .sorted { $0.t < $1.t }
+        guard series.count > 1 else { return series }
+
+        var start = 0
+        for i in 1..<series.count where isResetBoundary(series[i - 1], series[i], kind: kind) {
+            start = i
+        }
+        return Array(series[start...])
+    }
 
     /// Trailing-window samples for `kind`, ascending, cut at the most recent reset boundary.
     ///
@@ -164,7 +195,12 @@ public enum ProjectionEngine {
     /// fallback for samples with no `resets_at`, and it is taken as *relative* as well as
     /// absolute — a week that peaked at 12% resets to 0 without ever dropping the 20 points
     /// the flat threshold demands, and would otherwise be fitted straight across its own reset.
-    private static func isResetBoundary(_ previous: Sample, _ next: Sample, kind: WindowKind) -> Bool {
+    /// Public because the chart segments on this same rule. `SparklineView` used to restate it
+    /// as a percentage-drop test alone, and on this account's live data that missed a real
+    /// turnover: 15% at 13:18:31 falling to 1% at 13:28:32 is a 14-point drop, under
+    /// `resetDropThreshold`, while the reset instant jumping 13:20 → 18:20 identifies it at
+    /// once. The chart drew a cliff that never happened.
+    public static func isResetBoundary(_ previous: Sample, _ next: Sample, kind: WindowKind) -> Bool {
         if let before = previous.resetsAt(for: kind), let after = next.resetsAt(for: kind) {
             // A *jump*, not any movement. The 5-hour window's reset instant drifts forward
             // continuously as usage ages out — five minutes per five minutes of wall clock —
@@ -343,6 +379,12 @@ public enum ProjectionEngine {
     public static let variationDays = 14
     /// Fewer complete days than this and there is no spread worth quoting.
     public static let minimumVariationDays = 4
+    /// Bounds on the coefficient of variation. Named rather than inlined because
+    /// `pacedProjection` substitutes the ceiling when there is no measured variation at all,
+    /// and a substitute that drifted away from the clamp it is meant to be the top of would
+    /// quietly become a *narrower* interval than the engine's own worst case.
+    public static let variationFloor: Double = 0.25
+    public static let variationCeiling: Double = 2.0
 
     /// How much this account's daily usage varies, as a coefficient of variation, plus how
     /// many complete days it was measured over.
@@ -397,7 +439,7 @@ public enum ProjectionEngine {
         let variance = observed.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / (count - 1)
         let coefficient = variance.squareRoot() / mean
         guard coefficient.isFinite else { return nil }
-        return (min(max(coefficient, 0.25), 2.0), observed.count)
+        return (min(max(coefficient, variationFloor), variationCeiling), observed.count)
     }
 
     // MARK: Projection
@@ -458,11 +500,22 @@ public enum ProjectionEngine {
             sampleCount = usableSamples(samples, kind: kind, now: now).count
         }
 
-        var projectedAtReset: Double? = hoursUntilReset.flatMap { hours in
+        let projectedAtReset: Double? = hoursUntilReset.flatMap { hours in
             clampedProjection(currentPercent + percentPerHour * hours)
         }
-        withdrawIfUninformative(
-            band: &band, projection: &projectedAtReset, currentPercent: currentPercent)
+
+        // No longer withdrawn when the interval is wide. Suppression was written when this path
+        // also carried the weekly window, where a slope measured over 45 minutes and multiplied
+        // by a 168-hour horizon printed 171% on a week that finished at 23% — a wrong *centre*,
+        // which no error bar rescues. The weekly window is paced now and never reaches here, so
+        // the only window this path serves is the 5-hour one, whose horizon is at most five
+        // hours. A fit that noisy over that span produces a centre near the current reading and
+        // a wide interval around it, which is a true statement rather than a misleading one.
+        //
+        // What is left unguarded is the `.estimated` basis, which has no interval to state: a
+        // fit that failed outright falls back to transcript velocity and reports a bare number.
+        // That case carries the "estimated" badge in `MeterRow` instead, which is what it was
+        // added for.
 
         return Projection(
             kind: kind,
@@ -505,18 +558,35 @@ public enum ProjectionEngine {
 
         let remainingHours = max(0, resetsAt.timeIntervalSince(now) / 3600)
         let ratePerHour = max(0, currentPercent) / elapsedHours
-        var projectedAtReset: Double? = clampedProjection(
+        let projectedAtReset: Double? = clampedProjection(
             currentPercent + ratePerHour * remainingHours)
 
         var band: Double?
-        if let variation = dailyVariation(events: events, now: now), remainingHours > 0 {
+        if remainingHours > 0 {
+            // No measured variation is not evidence of *low* variation, so an account with
+            // too few complete days to measure gets the widest coefficient this engine will
+            // ever believe over the fewest days it will ever accept. Falling through with no
+            // band at all was the worse failure: it printed a bare paced number, which is the
+            // one thing `withdrawIfUninformative` exists to prevent.
+            let variation = dailyVariation(events: events, now: now)
+                ?? (coefficient: variationCeiling, days: minimumVariationDays)
             let daysRemaining = remainingHours / 24
             let sigmaPerDay = variation.coefficient * ratePerHour * 24
             let spread = daysRemaining + daysRemaining * daysRemaining / Double(variation.days)
-            band = confidenceT(df: variation.days - 1) * sigmaPerDay * spread.squareRoot()
+            let halfWidth = confidenceT(df: variation.days - 1) * sigmaPerDay * spread.squareRoot()
+            band = halfWidth.isFinite ? halfWidth : nil
         }
-        withdrawIfUninformative(
-            band: &band, projection: &projectedAtReset, currentPercent: currentPercent)
+
+        // A wide interval is rendered, never withdrawn. Pacing's centre is the window's own
+        // consumption over the window's own elapsed time — arithmetic on two observed
+        // quantities rather than an extrapolation — so the only thing that can go wrong here is
+        // imprecision, and imprecision is what a `±` is for.
+        //
+        // The width is not hypothetical. This account's daily coefficient of variation is 2.28
+        // (one 135M-token day among fourteen, seven of them empty), clamped to 2.0, which puts
+        // the interval past ±50 points. Under the rule that used to delete a forecast once its
+        // interval grew past a threshold, every weekly reading this account produced was
+        // suppressed, and the row showed no forecast at all.
 
         return Projection(
             kind: kind,
@@ -534,23 +604,6 @@ public enum ProjectionEngine {
     }
 
     private static let minimumElapsedHours: Double = 1
-
-    /// Past the informative width the *projection* goes too, not just the band.
-    ///
-    /// Dropping the band alone is what produced the weekly row's worst reading: "171% at
-    /// reset" with no error bar, from a rate fitted over 45 minutes and carried across three
-    /// days. Hiding the ± there does not make the number safer to read, it removes the only
-    /// thing on the row that said not to trust it. A forecast this app cannot put an interval
-    /// on is a forecast it should not print.
-    private static func withdrawIfUninformative(
-        band: inout Double?, projection: inout Double?, currentPercent: Double
-    ) {
-        guard let halfWidth = band else { return }
-        if !bandIsInformative(halfWidth, currentPercent: currentPercent) {
-            band = nil
-            projection = nil
-        }
-    }
 
     /// Non-finite in, nothing out: a corrupt payload must read as a missing projection rather
     /// than reach Swift Charts, where `min`/`max` pass NaN straight through.

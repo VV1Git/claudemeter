@@ -124,11 +124,50 @@ public enum WindowKind: String, Codable, Sendable {
     public var shortLabel: String { self == .fiveHour ? "5h" : "7d" }
     public var longLabel: String { self == .fiveHour ? "5-hour" : "Weekly" }
 
-    /// Nominal window length. The 5-hour window is *rolling* — `resets_at` drifts
-    /// forward as usage ages out — so this is only used to bound chart ranges and
-    /// to estimate a window start when no better information exists.
+    /// Nominal window length, and — for both kinds — the exact width of the period a chart
+    /// of that window should span.
+    ///
+    /// This used to carry the claim that the 5-hour window is *rolling*, with `resets_at`
+    /// drifting forward as usage ages out. That is not what the API returns. Across 153
+    /// consecutive polls covering 24 hours, `five_hour`'s reset instant took exactly five
+    /// distinct values — 18:20, 23:20, 04:20, 13:20, 18:20 — each held constant for its whole
+    /// cycle to within the sub-second jitter of the ISO parse, then stepped by exactly 18000s
+    /// at turnover (32400s across an idle stretch, where the next block opened late). It is a
+    /// fixed five-hour block anchored at first use after the previous one closed, so
+    /// `resetsAt - nominalDuration` is when the period opened.
+    ///
+    /// Should some other plan genuinely roll, that same arithmetic still names the instant the
+    /// oldest usage still being counted was spent — the lifetime of the window's current
+    /// contents — so nothing downstream depends on settling which reading applies.
     public var nominalDuration: TimeInterval {
         self == .fiveHour ? 5 * 3600 : 7 * 24 * 3600
+    }
+
+    /// The period a chart should span: from when this window opened to when it resets.
+    ///
+    /// Replaces the trailing `[now - nominalDuration, now]` the chart used to draw, which was
+    /// a lookback rather than a period and was measurably wrong — at 16:08 on 30 July the
+    /// 5-hour chart spanned 6.93 hours of wall clock under a heading that said "Last 5 hours",
+    /// because it reached back across a turnover into the previous block.
+    ///
+    /// Every branch returns `start < end`, so the caller can build `start...end` without
+    /// `ClosedRange` trapping on an inverted domain.
+    public func chartPeriod(resetsAt: Date?, now: Date) -> (start: Date, end: Date) {
+        if let resetsAt, resetsAt.timeIntervalSince1970.isFinite {
+            // The ordinary case: the period is open, so it opened one duration before it closes.
+            if resetsAt > now, resetsAt <= now.addingTimeInterval(nominalDuration) {
+                return (resetsAt.addingTimeInterval(-nominalDuration), resetsAt)
+            }
+            // The window turned over and no poll has noticed yet — up to five minutes under
+            // backoff, and four or five times a day. The period being drawn is the new one.
+            if resetsAt <= now, resetsAt > now.addingTimeInterval(-nominalDuration) {
+                return (resetsAt, resetsAt.addingTimeInterval(nominalDuration))
+            }
+        }
+        // No reset instant, a non-finite one, or one further out than a whole window — this
+        // account's own store contains a 5-hour reset reported 9h09m out, which anchored on
+        // would put the entire domain in the future and drop every sample the chart has.
+        return (now.addingTimeInterval(-nominalDuration), now)
     }
 }
 
@@ -518,6 +557,35 @@ public struct Projection: Sendable, Equatable {
         self.projectedBand = projectedBand
         self.resetsAt = resetsAt
         self.sampleCount = sampleCount
+    }
+
+    /// The interval's endpoints, so the text row and the chart's cone cannot disagree about
+    /// where the forecast's uncertainty actually reaches.
+    ///
+    /// Asymmetric on purpose for the weekly window. That window is fixed — all 153 stored
+    /// samples report the same `sevenDayResetsAt` to within a second, and utilization never
+    /// once fell across them — so within a cycle it can only climb, and a lower end below the
+    /// current reading is a claim the week will *un-consume* usage. Taken raw the live band
+    /// put that end at 0.2% on a window reading 35%, and `SparklineView` drew it: a cone
+    /// sloping down to the baseline under a window that cannot lose ground. The 5-hour window
+    /// is not floored, because usage there really does age out.
+    public var projectedLow: Double? {
+        guard let projected = projectedAtReset, projected.isFinite,
+            let band = projectedBand, band.isFinite, band >= 0
+        else { return nil }
+        let floor = (kind == .sevenDay && currentPercent.isFinite) ? max(0, currentPercent) : 0
+        // Clamped back under `projected` so the interval can never invert on its way to a
+        // string or a mark, whatever the floor and the band do relative to each other.
+        return min(max(projected - band, floor), projected)
+    }
+
+    /// Top of the interval, clamped to the same ceiling `clampedProjection` puts on the centre
+    /// so a 1000-point band from a one-hour-old week cannot reach Swift Charts as geometry.
+    public var projectedHigh: Double? {
+        guard let projected = projectedAtReset, projected.isFinite,
+            let band = projectedBand, band.isFinite, band >= 0
+        else { return nil }
+        return max(min(projected + band, ProjectionEngine.displayCeiling), projected)
     }
 
     /// True when usage is on pace to exhaust the window before it resets.

@@ -269,9 +269,17 @@ struct PanelView: View {
             // The samples themselves were real readings, so they stay visible during an outage;
             // the dashed forecast does not, since nobody is measuring the rate any more.
             if !model.samples.isEmpty {
-                PanelSection(title: "Last 5 hours", isExpanded: $expandedFiveHour) {
+                // Titles name the period, not a lookback: the charts now span the window itself
+                // rather than the trailing five hours or seven days, and "Last 5 hours" was
+                // already wrong on both counts — the old domain reached across turnovers and
+                // measured 6.93 hours. Built from `longLabel` so they cannot drift from the
+                // meter rows directly above, which read "5-hour" and "Weekly".
+                PanelSection(
+                    title: "\(WindowKind.fiveHour.longLabel) window", isExpanded: $expandedFiveHour
+                ) {
                     SparklineView(
                         samples: model.samples, kind: .fiveHour,
+                        resetsAt: model.fiveHourResetsAt,
                         projection: liveProjection(model.fiveHourProjection), now: now,
                         severity: model.fiveHourSeverity)
                 }
@@ -279,10 +287,15 @@ struct PanelView: View {
                 // The weekly window gets the same treatment for the same reason: the shaded
                 // cone is where its uncertainty lives, and the weekly forecast is the one
                 // carrying by far the most of it — days of horizon against a limit whose pace
-                // is set by behaviour rather than by anything measurable in the last hour.
-                PanelSection(title: "Last 7 days", isExpanded: $expandedWeekly) {
+                // is set by behaviour rather than by anything measurable in the last hour. On
+                // the fixed domain that cone is most of the chart's width, which is the honest
+                // proportion: most of the window is still ahead.
+                PanelSection(
+                    title: "\(WindowKind.sevenDay.longLabel) window", isExpanded: $expandedWeekly
+                ) {
                     SparklineView(
                         samples: model.samples, kind: .sevenDay,
+                        resetsAt: model.sevenDayResetsAt,
                         projection: liveProjection(model.sevenDayProjection), now: now,
                         severity: model.sevenDaySeverity)
                 }

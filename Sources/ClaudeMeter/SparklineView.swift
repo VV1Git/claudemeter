@@ -3,71 +3,55 @@ import Foundation
 import SwiftUI
 import UsageCore
 
-/// Utilization of one limit window over time, with the projection continued to the reset as
-/// a dashed line and its confidence band as a faint cone.
+/// Utilization of one limit window over its own period, with the projection continued to the
+/// reset as a dashed line and its confidence band as a faint cone.
 ///
-/// The x-domain runs past `now` to `resetsAt` on purpose: the question the chart answers is
-/// where the window is heading, not only where it has been. The 5-hour window is rolling, so
-/// a declining line is a normal reading (usage ageing out) and is never smoothed or clipped
-/// into a rise.
+/// The x-domain is the period itself — `[resetsAt - nominalDuration, resetsAt]` — not a
+/// trailing window ending at `now`. The chart answers "where is this window heading before it
+/// resets", and a lookback cannot: anchored on `now` it slid forward every poll, reached back
+/// across turnovers into the previous block, and on 30 July spanned 6.93 hours under a heading
+/// that read "Last 5 hours". A fixed domain also means the left edge holds still between polls
+/// while the line grows into it, instead of the whole plot creeping leftward under the reader.
 struct SparklineView: View {
     private let kind: WindowKind
     private let projection: Projection?
     private let now: Date
     private let severity: Severity?
-    /// Filtered in `init` rather than in a computed property because the domains, the tint
-    /// and the empty check all read it, and `body` runs on every poll.
+    /// Resolved in `init` rather than in computed properties because the marks, the scales, the
+    /// tint and the empty check all read them, and `body` runs on every poll.
     private let points: [Point]
+    private let xStart: Date
+    private let xEnd: Date
+    /// Whether this window has any reading at all, as against none inside the current period.
+    /// A fixed domain empties the chart at every turnover until the next poll lands — eight
+    /// minutes on 30 July, up to five under backoff, four or five times a day — and "no history
+    /// yet" would read as data loss where the truth is that the period just opened.
+    private let hasAnySamples: Bool
 
-    /// `severity` is defaulted so the contracted `init(samples:kind:projection:now:)` still
-    /// applies; pass it whenever the caller has the snapshot's own classification, because the
-    /// API sends a `severity` that need not agree with the numeric thresholds and the meter
-    /// above this chart is coloured from that field.
+    /// `resetsAt` is its own parameter rather than read off `projection` because `PanelView`
+    /// nils the projection during an outage while the cached snapshot still knows the period.
+    /// The x-axis must not change shape merely because a forecast was suppressed.
+    ///
+    /// `severity` is defaulted so the contracted `init(samples:kind:resetsAt:projection:now:)`
+    /// still applies; pass it whenever the caller has the snapshot's own classification,
+    /// because the API sends a `severity` that need not agree with the numeric thresholds and
+    /// the meter above this chart is coloured from that field.
     init(
-        samples: [Sample], kind: WindowKind, projection: Projection?, now: Date,
+        samples: [Sample], kind: WindowKind, resetsAt: Date?, projection: Projection?, now: Date,
         severity: Severity? = nil
     ) {
         self.kind = kind
         self.projection = projection
         self.now = now
         self.severity = severity
-        self.points = Self.series(samples, kind: kind, now: now)
-    }
 
-    /// The trailing `kind.nominalDuration` of samples, ascending, cut at the most recent reset.
-    ///
-    /// `ProjectionEngine.usableSamples` is not reused — its 45-minute trailing window is far
-    /// shorter than a chart wants — but its reset rule is, so a window that reset an hour ago
-    /// does not leave the previous window's plateau on the chart joined to the current one by a
-    /// cliff that never happened.
-    private static func series(_ samples: [Sample], kind: WindowKind, now: Date) -> [Point] {
-        let windowStart = now.addingTimeInterval(-kind.nominalDuration)
-        let ordered = samples
-            .filter { $0.t >= windowStart && $0.t <= now && $0.percent(for: kind) != nil }
-            .sorted { $0.t < $1.t }
-
-        var start = 0
-        if ordered.count > 1 {
-            for index in 1..<ordered.count
-            where isReset(ordered[index - 1], ordered[index], kind: kind) {
-                start = index
-            }
-        }
-
-        return ordered[start...].enumerated().map {
-            Point(id: $0.offset, t: $0.element.t, percent: $0.element.percent(for: kind) ?? 0)
-        }
-    }
-
-    /// A reset, not a decline. The 5-hour window is rolling, so utilization falling as usage
-    /// ages out is ordinary and stays on the chart; only a cliff of at least
-    /// `ProjectionEngine.resetDropThreshold` points between consecutive polls starts a new
-    /// series. The threshold is `UsageCore`'s and is not restated here.
-    private static func isReset(_ previous: Sample, _ next: Sample, kind: WindowKind) -> Bool {
-        guard let before = previous.percent(for: kind), let after = next.percent(for: kind) else {
-            return false
-        }
-        return before - after >= ProjectionEngine.resetDropThreshold
+        let period = kind.chartPeriod(resetsAt: resetsAt ?? projection?.resetsAt, now: now)
+        self.xStart = period.start
+        self.xEnd = period.end
+        self.points = ProjectionEngine.chartSamples(samples, kind: kind, period: period)
+            .enumerated()
+            .map { Point(id: $0.offset, t: $0.element.t, percent: $0.element.percent(for: kind) ?? 0) }
+        self.hasAnySamples = samples.contains { $0.percent(for: kind) != nil }
     }
 
     private struct Point: Identifiable {
@@ -84,25 +68,41 @@ struct SparklineView: View {
     }
 
     private static let height: CGFloat = 64
-    /// Minimum horizontal context, so two polls a minute apart don't render as a chart
-    /// spanning one minute.
-    private static let minimumSpan: TimeInterval = 15 * 60
 
     var body: some View {
-        Group {
-            if points.isEmpty {
-                placeholder
-            } else {
-                chart
+        VStack(alignment: .leading, spacing: 3) {
+            Group {
+                if points.isEmpty {
+                    placeholder
+                } else {
+                    chart
+                }
+            }
+            .frame(height: Self.height)
+
+            if let coverageNote {
+                Text(coverageNote)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
-        .frame(height: Self.height)
     }
 
     // MARK: Chart
 
     private var chart: some View {
         Chart {
+            // Behind everything: the stretch of the period this app was not watching.
+            if let gap = unrecordedGap {
+                RectangleMark(
+                    xStart: .value("From", gap.lowerBound),
+                    xEnd: .value("To", gap.upperBound),
+                    yStart: .value("Floor", 0),
+                    yEnd: .value("Ceiling", yUpper)
+                )
+                .foregroundStyle(Color.primary.opacity(0.05))
+            }
+
             ForEach(band) { point in
                 AreaMark(
                     x: .value("Time", point.t),
@@ -150,6 +150,16 @@ struct SparklineView: View {
                 .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [2.5, 3]))
                 .foregroundStyle(tint.opacity(0.55))
             }
+
+            // Where measurement stops and forecast begins. On a trailing domain this was the
+            // right-hand edge and needed no mark; on the period the observed line is the
+            // shorter segment — 14.6% of the width against the forecast's 31.9% on the live
+            // weekly chart — and the dash pattern alone stops carrying the boundary.
+            if now >= xStart, now <= xEnd {
+                RuleMark(x: .value("Now", now))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [1, 2]))
+                    .foregroundStyle(Color.primary.opacity(0.14))
+            }
         }
         .chartLegend(.hidden)
         .chartXScale(domain: xStart...xEnd)
@@ -169,7 +179,11 @@ struct SparklineView: View {
             }
         }
         .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 3)) { value in
+            // One tick a day across the weekly window, rather than the three the automatic
+            // count chose for a seven-day domain — three weekday names across a week reads as
+            // a sample of the axis rather than as the axis. The 5-hour window keeps automatic
+            // ticks, held to four so the rightmost label is not clipped by the plot edge.
+            AxisMarks(values: xAxisDates) { value in
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
                         Text(xLabel(date))
@@ -188,7 +202,10 @@ struct SparklineView: View {
         ZStack {
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
-            Text("No history yet — a point is recorded each poll.")
+            Text(
+                hasAnySamples
+                    ? "This window has no readings yet — it just opened."
+                    : "No history yet — a point is recorded each poll.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -215,47 +232,44 @@ struct SparklineView: View {
         ]
     }
 
+    /// The cone's endpoints come from `Projection` rather than from arithmetic here, so the
+    /// shaded area and the text row cannot disagree about the same interval. On the live weekly
+    /// reading that changes what the cone means: its lower edge used to descend from 35% toward
+    /// the baseline, drawing a fixed window losing usage it cannot lose, and now runs flat at
+    /// the current reading, which is the floor a fixed window actually has.
     private var band: [BandPoint] {
         guard let projection,
             let resetsAt = projection.resetsAt, resetsAt > now,
-            let projectedAtReset = projection.projectedAtReset, projectedAtReset.isFinite,
             projection.currentPercent.isFinite,
-            let halfWidth = projection.projectedBand, halfWidth.isFinite, halfWidth > 0
+            let low = projection.projectedLow, let high = projection.projectedHigh,
+            high - low > 0
         else { return [] }
         let current = projection.currentPercent
         return [
             BandPoint(id: 0, t: now, low: current, high: current),
-            BandPoint(
-                id: 1, t: resetsAt,
-                low: max(0, projectedAtReset - halfWidth),
-                high: min(yUpper, projectedAtReset + halfWidth)),
+            BandPoint(id: 1, t: resetsAt, low: low, high: high),
         ]
     }
 
     // MARK: Scales
 
-    private var xStart: Date {
-        let fallback = now.addingTimeInterval(-min(kind.nominalDuration, Self.minimumSpan))
-        guard let earliest = points.first?.t else { return fallback }
-        return min(earliest, fallback)
-    }
-
-    private var xEnd: Date {
-        let latest = max(now, points.last?.t ?? now)
-        let end = projected.last?.t ?? latest
-        return max(end, xStart.addingTimeInterval(Self.minimumSpan))
-    }
-
     /// 100 unless the series or the projection goes over it — the cap is the reference the
     /// chart is read against, so it never scales away, and an over-100 projection is not
     /// flattened into the ceiling.
+    ///
+    /// Grown for the projection's centre but deliberately *not* for the top of its interval.
+    /// Rescaling to fit the band is actively harmful now that the band is no longer withdrawn:
+    /// this account's weekly interval reaches 103%, which would push the ceiling to 110 and
+    /// squash the readings, and a one-hour-old week's interval would push it to the 200 cap and
+    /// leave a 3% line in the bottom sliver of the plot. A cone that runs off the top reads as
+    /// "this could go over" faster than a rescaled axis does, and Swift Charts clips marks
+    /// outside the domain, so nothing absurd reaches the renderer.
     private var yUpper: Double {
         var highest = points.map(\.percent).max() ?? 0
         if let projection, let projectedAtReset = projection.projectedAtReset,
             projectedAtReset.isFinite
         {
-            let band = projection.projectedBand.flatMap { $0.isFinite ? $0 : nil } ?? 0
-            highest = max(highest, projectedAtReset + band)
+            highest = max(highest, projectedAtReset)
         }
         guard highest.isFinite else { return 100 }
         let rounded = (max(highest, 100) / 10).rounded(.up) * 10
@@ -266,8 +280,72 @@ struct SparklineView: View {
         yUpper > 100 ? [0, 100, yUpper] : [0, 50, 100]
     }
 
+    // MARK: Coverage
+
+    /// The stretch of the period before the first recorded reading, when there is enough of it
+    /// to be worth saying so.
+    ///
+    /// Blank space under a chart whose y-axis starts at zero reads as *zero usage*, and that is
+    /// a lie the fixed domain newly makes possible: the weekly window is seven days wide while
+    /// this app has a day of samples, and the first of them already read 13%. The unwatched
+    /// stretch is therefore shaded and named rather than left to be misread as a quiet start.
+    ///
+    /// The 8% floor keeps it off the 5-hour chart in ordinary running, where the first poll
+    /// after a turnover lands a few minutes in.
+    private var unrecordedGap: ClosedRange<Date>? {
+        guard let first = points.first?.t, first > xStart else { return nil }
+        let span = xEnd.timeIntervalSince(xStart)
+        guard span > 0, first.timeIntervalSince(xStart) / span >= 0.08 else { return nil }
+        return xStart...first
+    }
+
+    /// What turns the shaded block from ambiguous into unambiguous: the region is unwatched,
+    /// not idle, and the window was already part-used when watching began.
+    private var coverageNote: String? {
+        guard unrecordedGap != nil, let first = points.first else { return nil }
+        let when = first.t.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        return "No readings before \(when) · \(Self.spoken(first.percent))% by then"
+    }
+
     // MARK: Labels
 
+    /// Tick instants, stated rather than left to `.automatic`.
+    ///
+    /// Two reasons the automatic values do not survive a fixed domain. They chose three ticks
+    /// for a seven-day span, which reads as a sample of the axis rather than as the axis; and
+    /// they place a tick within a few percent of the domain end, where Charts centres the label
+    /// on the tick, finds it crossing the plot edge, and renders `6 PM` as `6…` — then, given
+    /// trailing padding to work in, as a bare `…`. Padding cannot fix it because the label slot
+    /// is reserved symmetrically about the tick. Not emitting a tick there does.
+    ///
+    /// One an hour for the 5-hour window, one a day for the weekly one, each dropped if it
+    /// falls inside `edgeMargin` of either end.
+    private var xAxisDates: [Date] {
+        let span = xEnd.timeIntervalSince(xStart)
+        guard span > 0, span.isFinite else { return [] }
+        let step: TimeInterval = kind == .fiveHour ? 3600 : 24 * 3600
+        let margin = span * Self.edgeMargin
+
+        // Anchored on the period's own start rather than on clock boundaries: the 5-hour window
+        // opens at :20 past on this account, so hour-aligned ticks would drift relative to the
+        // period while these stay fixed to it.
+        var dates: [Date] = []
+        var offset = step
+        while offset < span {
+            dates.append(xStart.addingTimeInterval(offset))
+            offset += step
+        }
+        return dates.filter {
+            $0.timeIntervalSince(xStart) >= margin && xEnd.timeIntervalSince($0) >= margin
+        }
+    }
+
+    /// How close to the plot edge a tick may sit before its label is the thing that gets cut.
+    private static let edgeMargin: Double = 0.07
+
+    /// Minutes are kept on the 5-hour axis because the ticks are anchored to the period, which
+    /// opens whenever the block did — :20 past on this account — so an hour-only label would
+    /// put "5 PM" under a tick standing at 5:20.
     private func xLabel(_ date: Date) -> String {
         kind == .fiveHour
             ? date.formatted(.dateTime.hour().minute())
@@ -292,9 +370,18 @@ struct SparklineView: View {
     }
 
     private var accessibilitySummary: String {
-        var summary = "\(kind.longLabel) usage, \(Self.spoken(currentPercent)) percent now"
+        var summary = "\(kind.longLabel) window, \(Self.spoken(currentPercent)) percent now"
         if let projectedAtReset = projection?.projectedAtReset {
             summary += ", projected \(Self.spoken(projectedAtReset)) percent at reset"
+            // The interval is read out too. A forecast this wide is the reason the row exists;
+            // announcing only the centre would give a screen reader the one number the sighted
+            // reading is explicitly designed not to be taken alone.
+            if let low = projection?.projectedLow, let high = projection?.projectedHigh,
+                high - low > 0
+            {
+                let top = high >= 100 ? "over 100" : Self.spoken(high)
+                summary += ", between \(Self.spoken(low)) and \(top) percent"
+            }
         }
         return summary
     }

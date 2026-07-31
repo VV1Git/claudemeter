@@ -446,8 +446,8 @@ struct ProjectionTests {
 
     // MARK: - Band
 
-    @Test("A noisy series hides the confidence band")
-    func noisySeriesHidesBand() throws {
+    @Test("A noisy series states a wide band rather than hiding the forecast")
+    func noisySeriesStatesAWideBand() throws {
         // Swings of 18 points stay under the reset threshold, so the series is not split —
         // it is simply a terrible fit.
         let series = samples(count: 9) { $0 % 2 == 0 ? 50 : 68 }
@@ -465,18 +465,20 @@ struct ProjectionTests {
                 samples: series, events: [], now: Self.now))
 
         #expect(projection.basis == .measured)
-        // The projection goes with the band. A number this app cannot put an interval on is a
-        // number it must not print: shown bare it reads as a firm forecast, and the ± was the
-        // only thing on the row saying otherwise.
-        #expect(projection.projectedBand == nil)
-        #expect(projection.projectedAtReset == nil)
+        // This used to assert that both went away. Deleting a forecast because its interval is
+        // wide loses the forecast and the warning together, and it was doing so on every
+        // reading this account produced. A terrible fit now reports its centre with an interval
+        // wide enough to say not to lean on it, which is what a `±` is for.
+        let band = try #require(projection.projectedBand)
+        #expect(!ProjectionEngine.bandIsInformative(band, currentPercent: 40))
+        #expect(projection.projectedAtReset != nil)
         // The rate itself is still measured and still worth showing — it says what is
         // happening now, which is a claim about the past rather than about the reset.
         #expect(projection.percentPerHour.isFinite)
     }
 
-    @Test("The band and the projection both survive or both disappear, on a horizon-relative test")
-    func bandVisibilityTracksTheMaximum() throws {
+    @Test("The band widens with the horizon, and every fit keeps its forecast")
+    func bandWidensWithTheHorizon() throws {
         // The same badly-fitting series as above. Its band widens with the horizon, so the
         // identical fit lands either side of the ceiling purely by moving `resetsAt`.
         let series = samples(count: 9) { $0 % 2 == 0 ? 50 : 68 }
@@ -509,11 +511,14 @@ struct ProjectionTests {
         // noise twice over before the slope contributes anything.
         #expect(ProjectionEngine.halfWidth(fit: fit, hours: 0.25) > ceiling)
         let noisy = try #require(projection(hoursUntilReset: 4))
-        #expect(noisy.projectedBand == nil)
-        #expect(noisy.projectedAtReset == nil)
+        // Both are kept. The ceiling still says the band is too wide to act on; it no longer
+        // decides whether the reader is told anything at all.
+        let noisyBand = try #require(noisy.projectedBand)
+        #expect(!ProjectionEngine.bandIsInformative(noisyBand, currentPercent: 40))
+        #expect(noisy.projectedAtReset != nil)
 
-        // A clean fit at the same horizon and the same utilization clears it, so what is
-        // being tested is the quality of the evidence and not the shape of the test.
+        // A clean fit at the same horizon and the same utilization clears the ceiling, so what
+        // is being tested is the quality of the evidence and not the shape of the test.
         let cleanSeries = samples(count: 9) { 10 + 10 * (Double($0) * 5 / 60) }
         let clean = try #require(
             ProjectionEngine.project(
@@ -538,5 +543,205 @@ struct ProjectionTests {
         #expect(
             ProjectionEngine.project(
                 kind: .sevenDay, snapshot: sparse, samples: [], events: [], now: Self.now) != nil)
+    }
+
+    // MARK: - The weekly forecast survives a wide interval
+
+    /// Fourteen days of wildly uneven usage, which is what a real account looks like: one
+    /// enormous day among a fortnight of quiet ones. This is the shape that used to blank the
+    /// weekly row entirely.
+    private func lumpyFortnight(now: Date = ProjectionTests.now) -> [UsageEvent] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        var events: [UsageEvent] = []
+        for offset in 1...14 {
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
+            let output = offset == 1 ? 4_000_000 : (offset % 4 == 0 ? 120_000 : 0)
+            guard output > 0 else { continue }
+            events.append(
+                event("day-\(offset)", at: day.addingTimeInterval(43_200), output: output))
+        }
+        return events
+    }
+
+    @Test("A weekly forecast too uncertain to put a ± on is still shown, as an interval")
+    func weeklyWideIntervalIsShownNotWithdrawn() throws {
+        // The reported bug. At this account's real spread the half-width lands well past
+        // `bandIsInformative`'s ceiling, and the old code deleted the projection along with the
+        // band — so the row printed a pace and nothing about where the week was heading.
+        let resetsAt = Self.now.addingTimeInterval(2.24 * 24 * 3600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay,
+                snapshot: snapshot(sevenDay: LimitWindow(utilization: 35, resetsAt: resetsAt)),
+                samples: [], events: lumpyFortnight(), now: Self.now))
+
+        #expect(projection.basis == .paced)
+        let projected = try #require(projection.projectedAtReset)
+        let band = try #require(projection.projectedBand)
+        // Wide enough that the old gate would have withdrawn both, which is the whole point.
+        #expect(!ProjectionEngine.bandIsInformative(band, currentPercent: 35))
+        // 35% consumed over 114.2 elapsed hours is 0.306 points an hour; 53.8 hours left of
+        // the window carries that to 51.5%, which is the number the row had been withholding.
+        #expect(abs(projected - 51.5) < 0.5)
+    }
+
+    @Test("A paced weekly window always carries an interval, even with no history to measure")
+    func pacedWeeklyAlwaysHasAnInterval() throws {
+        // No events at all, so `dailyVariation` has nothing to say. It must widen the interval
+        // to the engine's worst case rather than leave a bare number, which is exactly the
+        // interval-free forecast the suppression rule exists to prevent.
+        let resetsAt = Self.now.addingTimeInterval(3 * 24 * 3600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay,
+                snapshot: snapshot(sevenDay: LimitWindow(utilization: 50, resetsAt: resetsAt)),
+                samples: [], events: [], now: Self.now))
+
+        #expect(projection.basis == .paced)
+        #expect(projection.projectedAtReset != nil)
+        let band = try #require(projection.projectedBand)
+        #expect(band > 0)
+    }
+
+    @Test("The 5-hour window states its interval too, however wide the fit makes it")
+    func fiveHourAlsoStatesItsInterval() throws {
+        // Both windows answer the same way now. The 5-hour one reaches this through the fitted
+        // path, whose horizon is at most five hours — the 171% that suppression was written
+        // against came from regressing the *weekly* window across three days, and that window
+        // is paced now and never reaches here.
+        let series = samples(count: 9) { $0 % 2 == 0 ? 30 : 46 }
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .fiveHour,
+                snapshot: snapshot(
+                    fiveHour: LimitWindow(
+                        utilization: 38, resetsAt: Self.now.addingTimeInterval(4 * 3600))),
+                samples: series, events: [], now: Self.now))
+
+        #expect(projection.basis == .measured)
+        let band = try #require(projection.projectedBand)
+        #expect(band > 0)
+        #expect(projection.projectedAtReset != nil)
+        // Not floored, unlike the weekly window: a rolling window really can shed usage.
+        #expect(projection.projectedLow == 0 || projection.projectedLow! < 38)
+    }
+
+    // MARK: - Interval endpoints
+
+    @Test("The weekly interval cannot claim the window will un-consume usage")
+    func weeklyIntervalIsFlooredAtTheCurrentReading() throws {
+        // A fixed window only climbs within a cycle, so a lower end under the current reading
+        // is not uncertainty, it is an impossible claim. Unfloored this band reaches -20.
+        let projection = Projection(
+            kind: .sevenDay, basis: .paced, percentPerHour: 0.3, currentPercent: 35,
+            timeToCap: nil, projectedAtReset: 50, projectedBand: 70,
+            resetsAt: Self.now.addingTimeInterval(2 * 24 * 3600), sampleCount: 0)
+
+        #expect(projection.projectedLow == 35)
+        #expect(projection.projectedHigh == 120)
+    }
+
+    @Test("The 5-hour interval is not floored, because that window really does shed usage")
+    func fiveHourIntervalIsNotFloored() throws {
+        let projection = Projection(
+            kind: .fiveHour, basis: .measured, percentPerHour: 2, currentPercent: 35,
+            timeToCap: nil, projectedAtReset: 50, projectedBand: 70,
+            resetsAt: Self.now.addingTimeInterval(3 * 3600), sampleCount: 8)
+
+        #expect(projection.projectedLow == 0)
+    }
+
+    @Test("Interval endpoints never invert and never exceed the display ceiling")
+    func intervalEndpointsStayTotal() throws {
+        let enormous = Projection(
+            kind: .sevenDay, basis: .paced, percentPerHour: 5, currentPercent: 3,
+            timeToCap: nil, projectedAtReset: 40, projectedBand: 1_004,
+            resetsAt: Self.now.addingTimeInterval(6 * 24 * 3600), sampleCount: 0)
+
+        let low = try #require(enormous.projectedLow)
+        let high = try #require(enormous.projectedHigh)
+        #expect(low <= 40)
+        #expect(high == ProjectionEngine.displayCeiling)
+
+        // No band, no interval — the endpoints are not invented from the centre alone.
+        let bandless = Projection(
+            kind: .sevenDay, basis: .paced, percentPerHour: 1, currentPercent: 10,
+            timeToCap: nil, projectedAtReset: 30, projectedBand: nil,
+            resetsAt: nil, sampleCount: 0)
+        #expect(bandless.projectedLow == nil)
+        #expect(bandless.projectedHigh == nil)
+    }
+
+    // MARK: - The chart spans the period, not a lookback
+
+    @Test("An open window's chart period runs from when it opened to when it resets")
+    func chartPeriodSpansTheOpenWindow() {
+        let resetsAt = Self.now.addingTimeInterval(2 * 3600)
+        let period = WindowKind.fiveHour.chartPeriod(resetsAt: resetsAt, now: Self.now)
+
+        #expect(period.end == resetsAt)
+        #expect(abs(period.start.timeIntervalSince(resetsAt) + 5 * 3600) < 1e-9)
+        // The period contains `now`, so the boundary between observed and forecast is on-chart.
+        #expect(period.start <= Self.now && Self.now <= period.end)
+    }
+
+    @Test("A window that turned over before the next poll charts the period that just opened")
+    func chartPeriodFollowsATurnover() {
+        // Up to five minutes under backoff, several times a day: the reset instant is in the
+        // past because nothing has polled since it passed.
+        let resetsAt = Self.now.addingTimeInterval(-120)
+        let period = WindowKind.fiveHour.chartPeriod(resetsAt: resetsAt, now: Self.now)
+
+        #expect(period.start == resetsAt)
+        #expect(abs(period.end.timeIntervalSince(resetsAt) - 5 * 3600) < 1e-9)
+    }
+
+    @Test("An absent or impossible reset instant falls back to the trailing period")
+    func chartPeriodFallsBackWithoutAReset() {
+        for resetsAt in [nil, Self.now.addingTimeInterval(9 * 3600)] as [Date?] {
+            let period = WindowKind.fiveHour.chartPeriod(resetsAt: resetsAt, now: Self.now)
+            #expect(period.end == Self.now)
+            #expect(abs(period.start.timeIntervalSince(Self.now) + 5 * 3600) < 1e-9)
+        }
+        // Every branch stays total, so `start...end` cannot trap.
+        for kind in [WindowKind.fiveHour, .sevenDay] {
+            let period = kind.chartPeriod(resetsAt: nil, now: Self.now)
+            #expect(period.start < period.end)
+        }
+    }
+
+    @Test("Chart samples stop at the period's edges and cut at a turnover")
+    func chartSamplesRespectThePeriod() throws {
+        let resetsAt = Self.now.addingTimeInterval(3600)
+        let period = WindowKind.fiveHour.chartPeriod(resetsAt: resetsAt, now: Self.now)
+        let previousReset = resetsAt.addingTimeInterval(-5 * 3600)
+
+        // Two readings from the block that closed at `previousReset`, then three from this one.
+        // The 15 → 1 step is only 14 points, under `resetDropThreshold`, so the chart's old
+        // percentage-drop rule missed it and drew a cliff straight through a real turnover.
+        let series = [
+            Sample(
+                t: previousReset.addingTimeInterval(-600), fiveHourPct: 12,
+                fiveHourResetsAt: previousReset, sevenDayPct: nil, sevenDayResetsAt: nil),
+            Sample(
+                t: previousReset.addingTimeInterval(-60), fiveHourPct: 15,
+                fiveHourResetsAt: previousReset, sevenDayPct: nil, sevenDayResetsAt: nil),
+            Sample(
+                t: previousReset.addingTimeInterval(600), fiveHourPct: 1,
+                fiveHourResetsAt: resetsAt, sevenDayPct: nil, sevenDayResetsAt: nil),
+            Sample(
+                t: Self.now.addingTimeInterval(-600), fiveHourPct: 6,
+                fiveHourResetsAt: resetsAt, sevenDayPct: nil, sevenDayResetsAt: nil),
+            // Beyond the period's end: a stale row from a future the chart does not draw.
+            Sample(
+                t: resetsAt.addingTimeInterval(60), fiveHourPct: 9,
+                fiveHourResetsAt: resetsAt, sevenDayPct: nil, sevenDayResetsAt: nil),
+        ]
+
+        let kept = ProjectionEngine.chartSamples(series, kind: .fiveHour, period: period)
+        #expect(kept.count == 2)
+        #expect(kept.first?.fiveHourPct == 1)
+        #expect(kept.last?.fiveHourPct == 6)
     }
 }

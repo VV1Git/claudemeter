@@ -181,6 +181,15 @@ struct MeterRow: View {
 
     /// Dropped when the projection lands within a point of where the window already is — a flat
     /// pace restating the current number is noise.
+    ///
+    /// The interval renders as `± n` on both windows, so the two rows are read the same way.
+    ///
+    /// The chart's cone is clamped where this is not — the weekly window is fixed and cannot
+    /// shed usage, so `projectedLow` floors at the current reading — but a `±` states a width
+    /// rather than a pair of endpoints, and widths are what the two rows have in common. A
+    /// reader comparing "± 4" on the 5-hour row against "± 51" on the weekly one learns
+    /// something immediately; two ranges with different clamping rules behind them do not
+    /// compare like that.
     private var atResetClause: String? {
         guard let projection, let projected = projection.projectedAtReset, projected.isFinite,
             abs(projected - projection.currentPercent) >= 1
