@@ -32,6 +32,28 @@ public enum Prefs {
     /// occasionally rather than watching.
     public static let expandedHours = "expandedHours"
 
+    /// `Bool`. Default false. Today's four tiles are a summary of the day, not the live reading
+    /// the panel gets opened for — that is the two meters, which never collapse. The three stats
+    /// groups run to around 250pt together on a panel that has to fit under the menu bar, and
+    /// shipping them open would mean the panel only gets smaller after three clicks.
+    public static let expandedToday = "expandedToday"
+    /// `Bool`. Default false — a lifetime cache-hit ratio moves so slowly that a reader who saw it
+    /// last week has seen this week's value.
+    public static let expandedAllRecorded = "expandedAllRecorded"
+    /// `Bool`. Default false. This is the group with the best claim to opening by itself, since it
+    /// answers the one question the meters above it cannot — how much work is left, rather than
+    /// what percentage is gone. It loses anyway on a first run, which is the only run a default
+    /// decides: headroom needs a calibration built from several intervals of history, so on a
+    /// fresh install the group renders nothing at all and opening it by default shows an empty
+    /// heading.
+    public static let expandedHeadroom = "expandedHeadroom"
+
+    /// `Bool`. Default false. Not a setting anyone chooses: it is the two-column decision the
+    /// panel measured its way to last time, kept so it opens in the shape it closed in. The
+    /// measurement it comes from does not exist until after the first layout pass, so without a
+    /// seed a two-column panel would open narrow and widen in front of the user every time.
+    public static let panelWide = "panelWide"
+
     /// `Double`, seconds. The cadence the app has *learned*, not the one the user asked for —
     /// persisted so a rate limit discovered in one session is still respected after a relaunch.
     public static let pollIntervalSeconds = "pollIntervalSeconds"
@@ -56,6 +78,10 @@ public enum Prefs {
         public static let expandedSessions = false
         public static let expandedDaily = false
         public static let expandedHours = false
+        public static let expandedToday = false
+        public static let expandedAllRecorded = false
+        public static let expandedHeadroom = false
+        public static let panelWide = false
         public static let preferredPollIntervalSeconds = 180
     }
 
@@ -129,6 +155,10 @@ public enum Prefs {
             expandedSessions: Default.expandedSessions,
             expandedDaily: Default.expandedDaily,
             expandedHours: Default.expandedHours,
+            expandedToday: Default.expandedToday,
+            expandedAllRecorded: Default.expandedAllRecorded,
+            expandedHeadroom: Default.expandedHeadroom,
+            panelWide: Default.panelWide,
             preferredPollIntervalSeconds: Default.preferredPollIntervalSeconds,
         ])
     }

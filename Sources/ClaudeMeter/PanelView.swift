@@ -4,10 +4,11 @@ import UsageCore
 
 // MARK: - Panel
 
-/// The whole menu bar panel: two meters, three collapsible sections, a stats grid, a footer.
+/// The whole menu bar panel: two meters, five collapsible sections, three collapsible stat
+/// groups, a footer.
 ///
-/// Narrow and single-column while the sections are closed. Expanded, it lays out in two columns
-/// and gains a height cap.
+/// One narrow column while the content still fits the screen, two columns and a height cap once it
+/// does not — see `settleLayout()`.
 ///
 /// The reason is that one section is far taller than the others: "Last 30 days" carries the daily
 /// chart *and* four proportion groups (models, effort, tokens, cost share). Stacked in one 320pt
@@ -28,6 +29,20 @@ struct PanelView: View {
     @AppStorage(Prefs.expandedDaily) private var expandedDaily = Prefs.Default.expandedDaily
     @AppStorage(Prefs.expandedHours) private var expandedHours = Prefs.Default.expandedHours
 
+    /// One key per stats group rather than one for the block, because the three headers already
+    /// exist — collapsing them costs no new rows, where a single "Stats" wrapper would have to add
+    /// a header the panel does not have today or drop three that carry the period each grid covers.
+    @AppStorage(Prefs.expandedToday) private var expandedToday = Prefs.Default.expandedToday
+    @AppStorage(Prefs.expandedAllRecorded) private var expandedAllRecorded = Prefs.Default
+        .expandedAllRecorded
+    @AppStorage(Prefs.expandedHeadroom) private var expandedHeadroom = Prefs.Default
+        .expandedHeadroom
+
+    /// Whether the panel is in its two-column form. Maintained by `settleLayout()` from measured
+    /// height rather than from which sections are open, and persisted only as a seed: see
+    /// `Prefs.panelWide`.
+    @AppStorage(Prefs.panelWide) private var isWide = Prefs.Default.panelWide
+
     /// Drives every countdown and the "updated Ns ago" line. Ticked into state rather than read
     /// inline so all the relative strings in one pass of the body agree with each other.
     @State private var now = Date()
@@ -42,17 +57,81 @@ struct PanelView: View {
     private static let horizontalPadding: CGFloat = 14
     private static let dividerThickness: CGFloat = 1
 
-    /// Widen when the content is about to get tall.
+    /// Two columns exactly when one column would not fit the screen *and* splitting it would help,
+    /// rather than because some particular section is open.
     ///
-    /// `expandedDaily` alone is enough: that section carries the daily chart and four proportion
-    /// groups, and on its own it overruns a single column. Two of the lighter sections together do
-    /// the same. One light section on its own stays narrow, because a 620pt-wide panel showing a
-    /// single sparkline looks like a mistake.
-    private var isWide: Bool {
-        let openLightSections = [expandedFiveHour, expandedWeekly, expandedSessions, expandedHours]
-            .filter { $0 }.count
-        return expandedDaily || openLightSections >= 2
+    /// The rule this replaces named sections: `expandedDaily` on its own, or any two of the lighter
+    /// ones. That is what made collapsing feel broken. With "Last 30 days" open the panel was wide
+    /// by definition, so closing every other section in turn changed nothing, and the only control
+    /// that reached the layout was the one section the reader wanted to keep open. Measuring
+    /// instead makes every collapse count towards it: each one shortens the content, and any
+    /// sequence of them that gets it back under the screen height restores the single column.
+    ///
+    /// The second condition is the part a height alone cannot say. A panel that overruns because
+    /// the session list is long, with the breakdown collapsed, has nothing to move into a second
+    /// column — the split would buy back one collapsed header and cost the full width. That case
+    /// stays narrow and scrolls, which is what the old rule did with it too.
+    ///
+    /// Content that fits in neither form is still the height cap's problem, not this one.
+    ///
+    /// Both comparisons carry the band on the side that keeps the current form; see
+    /// `PanelLayout.hysteresis`.
+    private func settleLayout() {
+        let stacked = stackedContentHeight
+        guard stacked > 0 else { return }
+        let wanted = PanelLayout.wantsWide(
+            stackedHeight: stacked, splitSaving: splitSaving,
+            maximumHeight: maximumHeight, isWide: isWide)
+        // Guarded rather than assigned every pass: this runs on each frame of a section's open
+        // animation, and `@AppStorage` writes through to `UserDefaults` whether or not the value
+        // moved.
+        if wanted != isWide { isWide = wanted }
     }
+
+    /// What the second column buys: the shorter block moves up beside the taller one instead of
+    /// sitting under it, so the height saved is the whole of the shorter block plus the gap that
+    /// separated them. Heights of zero are a pass that has not measured yet, and read here as a
+    /// saving too small to act on — the safe answer for a pass that knows nothing.
+    private var splitSaving: Double {
+        PanelLayout.splitSaving(
+            leading: columnHeights.leading, daily: columnHeights.daily,
+            stackedGap: Self.stackedGap)
+    }
+
+    /// The height the content *would* have in one column, whichever form it is in now.
+    ///
+    /// Being able to ask that from inside the other form is what keeps the decision above from
+    /// feeding on itself. The obvious version — widen when the measured height exceeds the screen —
+    /// oscillates, because widening is precisely what makes the measured height small again, which
+    /// satisfies the condition to narrow, which makes it large again: the panel changes form every
+    /// frame.
+    ///
+    /// So the two blocks that swap columns are measured separately and the arrangement is
+    /// substituted rather than re-measured. Side by side they occupy `max(leading, daily)`; stacked
+    /// they occupy `leading + gap + daily`; everything else on the panel — footer, dividers,
+    /// padding — is common to both and cancels. The only thing the current form decides is which
+    /// of the two terms is subtracted back out.
+    ///
+    /// "Cancels" is a requirement on those other terms, not an observation about them. The health
+    /// notice wraps its text, so left to itself it is *not* common to both: at 251pt against
+    /// 592pt of measure, a long decoding error runs about nine lines in one column and four in
+    /// two, a 65pt difference that alone exceeds the hysteresis band and flips the panel between
+    /// forms every frame. It is pinned to one width in `content` for exactly this reason.
+    ///
+    /// The substitution is exact at rest and generous mid-flight, which is the useful direction.
+    /// The blocks animate to their new sizes after a change of form, so during those 0.3s the
+    /// estimate carries the outgoing arrangement's slack — too tall just after narrowing to wide,
+    /// too short just after widening to narrow. Both errors argue for staying where the panel just
+    /// went.
+    private var stackedContentHeight: Double {
+        PanelLayout.stackedHeight(
+            measured: contentHeight, isWide: isWide, leading: columnHeights.leading,
+            daily: columnHeights.daily, stackedGap: Self.stackedGap)
+    }
+
+    /// The 12pt spacing, divider and second 12pt spacing between the two blocks when they stack,
+    /// which the two-column form does not spend.
+    private static let stackedGap: CGFloat = 12 + dividerThickness + 12
 
     /// Width of the single-column form.
     private static let narrowWidth: CGFloat = 320
@@ -98,10 +177,49 @@ struct PanelView: View {
         }
     }
 
+    /// Natural heights of the two blocks that swap columns, which `stackedContentHeight` needs
+    /// apart — in one column they share a `VStack` and `contentHeight` cannot tell them apart.
+    @State private var columnHeights = ColumnHeights()
+
+    /// One preference rather than two, so both heights land in the same update. Measured a key
+    /// apart, a pass that carried the new height of one block and the old height of the other
+    /// would put the decision against a total neither form has.
+    private struct ColumnHeights: Equatable {
+        var leading: CGFloat = 0
+        var daily: CGFloat = 0
+    }
+
+    private struct ColumnHeightsKey: PreferenceKey {
+        static let defaultValue = ColumnHeights()
+        /// Componentwise, because each probe reports one field and leaves the other at zero.
+        static func reduce(value: inout ColumnHeights, nextValue: () -> ColumnHeights) {
+            let next = nextValue()
+            value.leading = max(value.leading, next.leading)
+            value.daily = max(value.daily, next.daily)
+        }
+    }
+
+    /// Reports a block's height without taking part in the layout: a background is offered the size
+    /// its content has already chosen, so measuring from there cannot change it.
+    private func heightProbe(_ report: @escaping (CGFloat) -> ColumnHeights) -> some View {
+        GeometryReader { proxy in
+            Color.clear.preference(key: ColumnHeightsKey.self, value: report(proxy.size.height))
+        }
+    }
+
     /// Never taller than the screen it is hanging from. Read at layout time rather than cached,
     /// since the panel can be opened after the display arrangement has changed.
+    ///
+    /// The screen the *status item* is on, not `NSScreen.main`, for the reason `PanelAnchor`
+    /// gives about horizontal placement and which applies just as much to height: `main` is the
+    /// screen with the key window, so a laptop-plus-external desk with the key window on the
+    /// external measures a panel hanging from the laptop's menu bar against the external's
+    /// height. That reads as 1392pt of room on a display with 852, and the panel is neither
+    /// capped nor split — it is simply clipped off the bottom, which is the failure the whole
+    /// rule exists to prevent.
     private var maximumHeight: CGFloat {
-        let visible = NSScreen.main?.visibleFrame.height ?? 900
+        let visible = PanelAnchor.statusItemScreen?.visibleFrame.height
+            ?? NSScreen.main?.visibleFrame.height ?? 900
         return max(400, visible - 48)
     }
 
@@ -142,6 +260,15 @@ struct PanelView: View {
         .onPreferenceChange(ContentHeightKey.self) { height in
             contentHeight = height
         }
+        .onPreferenceChange(ColumnHeightsKey.self) { heights in
+            columnHeights = heights
+        }
+        // Not inside the preference handlers. Those run from the layout pass that produced the
+        // measurement, and the form is a function of *both* of them — deciding from whichever
+        // arrived first would judge a half-updated pair. `onChange` runs after the update has
+        // settled, and a decision that changes nothing costs a comparison.
+        .onChange(of: contentHeight) { settleLayout() }
+        .onChange(of: columnHeights) { settleLayout() }
         .animation(PanelSection<EmptyView>.toggle, value: isWide)
         .animation(PanelSection<EmptyView>.toggle, value: contentHeight)
         .task { await model.refreshNow() }
@@ -150,9 +277,22 @@ struct PanelView: View {
 
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Full width in both layouts: it explains the state of everything below it.
+            // Pinned to the narrow column's width in *both* layouts rather than spanning the
+            // panel, because its height has to be the same in both. It is the one block outside
+            // the two column probes whose height depends on width — `detail` is a wrapping
+            // `Text` — and `stackedContentHeight` reconstructs the one-column height on the
+            // assumption that everything outside those probes cancels. Left to span, a long
+            // decoding error wraps to about nine lines at 251pt of measure and four at 592pt;
+            // that 65pt is more than the whole hysteresis band, so the panel would satisfy the
+            // condition to widen in one form and the condition to narrow in the other, and
+            // change form on every frame for as long as the notice was on screen — which is
+            // whenever the app is offline, the only time it exists.
+            //
+            // Capping the measure is also the better reading: a caption running the full 633pt
+            // of the two-column form is well past the line length anything else here uses.
             if let notice = healthNotice {
                 HealthNotice(notice: notice)
+                    .frame(width: Self.narrowContentWidth, alignment: .leading)
             }
 
             // One HStack in both forms, so the leading column keeps its identity across the
@@ -162,7 +302,13 @@ struct PanelView: View {
             // top of the incoming two, which is the ghosting half of the old jump.
             HStack(alignment: .top, spacing: isWide ? Self.columnGap : 0) {
                 VStack(alignment: .leading, spacing: 12) {
-                    narrowLeadingContent
+                    // Nested in a stack of its own rather than spliced straight in, so that its
+                    // height can be measured on its own. Narrow, this block and the breakdown
+                    // below share a column, and `stackedContentHeight` needs the two apart. The
+                    // spacing matches the stack outside it, so the arrangement is unchanged.
+                    VStack(alignment: .leading, spacing: 12) { narrowLeadingContent }
+                        .background(heightProbe { ColumnHeights(leading: $0) })
+
                     // Narrow, the breakdown simply carries on down the same column.
                     if !isWide {
                         Divider()
@@ -363,6 +509,10 @@ struct PanelView: View {
                 }
             }
         }
+        // Measured here rather than at either call site, since only one of them renders at a time
+        // and the height is the same in both — the column and the narrow content are within 8pt
+        // of each other in width.
+        .background(heightProbe { ColumnHeights(daily: $0) })
     }
 
     /// Fractions are taken over *every* model, not just the rows shown, so a truncated list
@@ -458,9 +608,10 @@ struct PanelView: View {
     @ViewBuilder private var headroom: some View {
         let five = model.fiveHourCalibration
         let weekly = model.sevenDayCalibration
+        // Still gated on having something to say. A collapsible empty section is worse than no
+        // section: the chevron promises content that opening it does not produce.
         if five != nil || weekly != nil || model.cyclePace != nil {
-            VStack(alignment: .leading, spacing: 6) {
-                sectionLabel("Headroom")
+            PanelSection(title: "Headroom", isExpanded: $expandedHeadroom) {
                 grid(columns: 2) {
                     if let five, let left = five.headroom(fromPercent: model.fiveHourPercent ?? 0) {
                         StatTile(
@@ -546,9 +697,11 @@ struct PanelView: View {
 
     @ViewBuilder private var stats: some View {
         if model.eventCount > 0 {
-            VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 6) {
-                    sectionLabel("Today")
+            // 8pt between the groups rather than the 10 they sat at while permanently open, so
+            // three collapsed stats headers keep the same rhythm as the collapsed section headers
+            // directly above them in `lightSections`.
+            VStack(alignment: .leading, spacing: 8) {
+                PanelSection(title: "Today", isExpanded: $expandedToday) {
                     grid(columns: 2) {
                         StatTile(
                             label: "Tokens in",
@@ -579,8 +732,7 @@ struct PanelView: View {
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    sectionLabel("All recorded activity")
+                PanelSection(title: "All recorded activity", isExpanded: $expandedAllRecorded) {
                     grid {
                         StatTile(
                             label: "Cache hit",
@@ -834,13 +986,6 @@ struct PanelView: View {
     }
 
     // MARK: Shared bits
-
-    private func sectionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.caption)
-            .textCase(.uppercase)
-            .foregroundStyle(.secondary)
-    }
 
     private func subLabel(_ text: String) -> some View {
         Text(text)

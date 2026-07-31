@@ -27,6 +27,14 @@ import SwiftUI
 /// is committed once per turn of the run loop rather than per call — measured, while the frame went
 /// 684 → 664 → −388 → 664 in-process across one resize, the window server held the *previous* frame
 /// throughout and then took only the last value. AppKit's off-screen intermediate is never drawn.
+extension PanelAnchor {
+    /// The display the menu bar item hangs from, for callers that need to measure against the
+    /// same screen this places the panel on. `nil` before the status item exists.
+    @MainActor static var statusItemScreen: NSScreen? {
+        AnchorView.statusItemWindow?.screen
+    }
+}
+
 struct PanelAnchor: NSViewRepresentable {
     func makeNSView(context: Context) -> AnchorView { AnchorView() }
 
@@ -123,7 +131,7 @@ extension PanelAnchor {
         /// Unambiguous in practice: the item's window is an `NSStatusBarWindow` at `.statusBar`,
         /// while the panel itself sits at `.popUpMenu`, so this cannot pick up the panel it is
         /// about to move.
-        private static var statusItemWindow: NSWindow? {
+        fileprivate static var statusItemWindow: NSWindow? {
             NSApp.windows.first { $0.level == .statusBar }
         }
     }
