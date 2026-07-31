@@ -191,11 +191,25 @@ struct MeterRow: View {
     /// something immediately; two ranges with different clamping rules behind them do not
     /// compare like that.
     private var atResetClause: String? {
-        guard let projection, let projected = projection.projectedAtReset, projected.isFinite,
-            abs(projected - projection.currentPercent) >= 1
+        guard let projection, let projected = projection.projectedAtReset, projected.isFinite
         else { return nil }
+        let band = projection.projectedBand.flatMap {
+            $0.isFinite && $0.rounded() >= 1 ? $0 : nil
+        }
+        // A forecast that lands where the window already is used to be dropped as noise, on
+        // the grounds that restating the current number says nothing. With an interval beside
+        // it that stopped being true, and the omission was the row's most common failure: four
+        // identical polls are what an idle window reports, they fit a rate of exactly zero, and
+        // a zero rate loses `rateClause` to its half-point floor and the forecast to this
+        // test — so the row went blank precisely when it was quietest. On the live 5-hour
+        // window that is "3% at reset ± 12", which says the window could still finish anywhere
+        // under 15%, and is the opposite of nothing.
+        //
+        // Without an interval there is genuinely nothing to add, so the old rule still governs
+        // that case: a bare number equal to the one already on the row is not a forecast.
+        guard band != nil || abs(projected - projection.currentPercent) >= 1 else { return nil }
         var clause = "\(Self.integer(projected))% at reset"
-        if let band = projection.projectedBand, band.isFinite, band.rounded() >= 1 {
+        if let band {
             clause += " ± \(Self.integer(band))"
         }
         return clause

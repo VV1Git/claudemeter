@@ -604,6 +604,33 @@ struct ProjectionTests {
         #expect(band > 0)
     }
 
+    @Test("An idle window fits a rate of zero and still carries an interval to state")
+    func idleWindowStillHasAnInterval() throws {
+        // What an idle 5-hour window actually reports: four identical polls ten minutes apart,
+        // which is the live shape of this account between bursts. The rate is exactly zero and
+        // the forecast lands on the current reading, so every clause keyed on movement drops —
+        // which is why the row went blank whenever nothing was happening. The band is what is
+        // left to say, and it is not small: four flat polls carried three hours forward pin
+        // down the endpoint to about ±12 points, not to the percentage point.
+        let series = samples(kind: .fiveHour, stepMinutes: 10, count: 4) { _ in 3 }
+        let resetsAt = Self.now.addingTimeInterval(3.4 * 3600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .fiveHour,
+                snapshot: snapshot(fiveHour: LimitWindow(utilization: 3, resetsAt: resetsAt)),
+                samples: series, events: [], now: Self.now))
+
+        #expect(projection.basis == .measured)
+        #expect(projection.percentPerHour == 0)
+        let projected = try #require(projection.projectedAtReset)
+        #expect(abs(projected - 3) < 1e-9)
+        // A flat fit is not a certain one. The residual scale floors at the quantization sigma
+        // precisely so a run of identical integers cannot claim the next three hours are known.
+        let band = try #require(projection.projectedBand)
+        #expect(band > 5)
+        #expect(projection.projectedHigh! > 10)
+    }
+
     @Test("The 5-hour window states its interval too, however wide the fit makes it")
     func fiveHourAlsoStatesItsInterval() throws {
         // Both windows answer the same way now. The 5-hour one reaches this through the fitted
