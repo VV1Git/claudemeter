@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UsageCore
 
 // MARK: - Panel anchoring
 
@@ -36,9 +37,17 @@ extension PanelAnchor {
 }
 
 struct PanelAnchor: NSViewRepresentable {
+    /// The size the panel's window should have. Comes from `PanelSize`, which is `Animatable`,
+    /// so this is the *interpolated* size on each frame of a resize rather than the destination
+    /// — which is what keeps the window gliding rather than jumping to its final size while the
+    /// content animates underneath it.
+    var size: CGSize
+
     func makeNSView(context: Context) -> AnchorView { AnchorView() }
 
-    func updateNSView(_ view: AnchorView, context: Context) {}
+    func updateNSView(_ view: AnchorView, context: Context) {
+        view.apply(size: size)
+    }
 
     static func dismantleNSView(_ view: AnchorView, coordinator: ()) {
         view.stopObserving()
@@ -51,10 +60,6 @@ extension PanelAnchor {
     /// a click by accident.
     @MainActor
     final class AnchorView: NSView {
-        /// Breathing room at the screen edge rather than flush against it, near enough to the gap
-        /// the rightmost menu bar item leaves.
-        private static let screenGap: CGFloat = 8
-
         private var observers: [any NSObjectProtocol] = []
 
         /// The reposition below posts `didMove` itself, and this is what stops that arriving
@@ -62,6 +67,22 @@ extension PanelAnchor {
         /// frame is updated before the notification lands — but only while every origin asked for
         /// is honoured, and the cost of being wrong about that is unbounded recursion.
         private var isRepositioning = false
+
+        /// Zero until the first layout has measured the content.
+        private var desiredSize: CGSize = .zero
+
+        /// The size SwiftUI wants, imposed on the window rather than left to it.
+        ///
+        /// The hosting view grows the window to fit its content but does not reliably shrink it:
+        /// collapsing a section took the content from 676×940 to 320×486 and left the window at
+        /// 676×940, which centred the smaller content inside it and put the panel 257pt down the
+        /// screen, detached from the menu bar. No resize notification is posted for a resize that
+        /// does not happen, which is why correcting the origin alone could not reach it.
+        func apply(size: CGSize) {
+            guard size.width > 0, size.height > 0 else { return }
+            desiredSize = size
+            reposition()
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -101,30 +122,30 @@ extension PanelAnchor {
                 let screen = statusItem.screen ?? window.screen ?? NSScreen.main
             else { return }
 
-            let x = Self.originX(
-                width: window.frame.width,
-                statusItemLeading: statusItem.frame.minX,
-                bounds: screen.visibleFrame)
+            let frame = window.frame
+            let bounds = screen.visibleFrame
+            // The size SwiftUI asked for, falling back to the window's own while nothing has
+            // been measured yet.
+            let size = desiredSize == .zero ? frame.size : desiredSize
+            let x = PanelLayout.originX(
+                width: size.width, statusItemLeading: statusItem.frame.minX,
+                boundsMinX: bounds.minX, boundsMaxX: bounds.maxX)
+            // Both axes, because a resize that changes only the height still moves the top edge:
+            // AppKit holds the origin, the origin is the bottom-left, so the panel comes away
+            // from the menu bar by whatever height it lost. Checking x alone used to return
+            // early on exactly those resizes and leave it there.
+            let y = PanelLayout.originY(height: size.height, boundsMaxY: bounds.maxY)
 
-            // Under a point apart is AppKit and this rule agreeing; moving anyway would post
-            // another notification to no effect.
-            guard abs(window.frame.minX - x) > 0.5 else { return }
+            // Under a point apart on every term is AppKit and this rule agreeing; setting the
+            // frame anyway would post another notification to no effect.
+            let target = CGRect(x: x, y: y, width: size.width, height: size.height)
+            guard abs(frame.minX - target.minX) > 0.5 || abs(frame.minY - target.minY) > 0.5
+                || abs(frame.width - target.width) > 0.5
+                || abs(frame.height - target.height) > 0.5
+            else { return }
             isRepositioning = true
-            window.setFrameOrigin(CGPoint(x: x, y: window.frame.minY))
+            window.setFrame(target, display: true)
             isRepositioning = false
-        }
-
-        /// Leading edge under the status item while the panel fits to the right of it, and past
-        /// that a trailing edge held inside the screen — which is the same thing as growing
-        /// leftward. Monotonic and continuous in `width`, which is the property that makes the
-        /// resize glide instead of jump.
-        ///
-        /// The outer clamp is for the case the inner one cannot express: a panel wider than the
-        /// screen it hangs on has no placement that fits, and the leading edge is the end to keep,
-        /// because that is where the content starts.
-        static func originX(width: CGFloat, statusItemLeading: CGFloat, bounds: CGRect) -> CGFloat {
-            let insideTrailingEdge = bounds.maxX - screenGap - width
-            return max(bounds.minX + screenGap, min(statusItemLeading, insideTrailingEdge))
         }
 
         /// `MenuBarExtra` does not expose its `NSStatusItem`, so the item is found by window level.

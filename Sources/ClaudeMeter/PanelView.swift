@@ -247,16 +247,13 @@ struct PanelView: View {
         // Height rides in the same modifier rather than in a `.frame(maxHeight:)` of its own, so
         // the two dimensions are interpolated from a single animatable value and the window
         // cannot finish widening before it has finished growing. See `PanelSize` for why an
-        // ordinary `.frame` does not reach the window at all.
+        // ordinary `.frame` does not reach the window at all. `PanelAnchor` travels inside that
+        // modifier, so the window's size and placement are driven from the same interpolated
+        // values the content is.
         .modifier(
             PanelSize(
                 width: isWide ? Self.wideWidth : Self.narrowWidth,
                 height: contentHeight > 0 ? min(contentHeight, maximumHeight) : 0))
-        // Growing the window is only half of the two-column switch when the panel is far enough
-        // right that it cannot grow rightward. The other half is moving it, which AppKit does in
-        // one jump of nearly the whole width — so the placement is taken over here and made
-        // continuous, and the panel expands leftward instead. See `PanelAnchor`.
-        .background(PanelAnchor().frame(width: 0, height: 0))
         .onPreferenceChange(ContentHeightKey.self) { height in
             contentHeight = height
         }

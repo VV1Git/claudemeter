@@ -103,7 +103,17 @@ struct PanelSize: ViewModifier, Animatable {
 
     /// Pinned top-leading, so the content stays against the edge the window grows away from and
     /// the second column is uncovered rather than slid into place.
+    ///
+    /// The anchor rides here rather than on the panel's own body so that it receives the
+    /// *interpolated* size on every frame of a resize. `PanelAnchor` imposes that size on the
+    /// window, which the hosting view will grow to fit its content but will not reliably shrink;
+    /// given the destination size in one step instead, the window would jump to its final shape
+    /// while the content animated into it.
     func body(content: Content) -> some View {
-        content.frame(width: width, height: height > 0 ? height : nil, alignment: .topLeading)
+        content
+            .frame(width: width, height: height > 0 ? height : nil, alignment: .topLeading)
+            .background(
+                PanelAnchor(size: CGSize(width: width, height: height))
+                    .frame(width: 0, height: 0))
     }
 }

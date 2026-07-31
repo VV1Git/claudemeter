@@ -67,6 +67,40 @@ public enum PanelLayout {
         return measured - max(leading, daily) + leading + stackedGap + daily
     }
 
+    /// Breathing room at the screen edge rather than flush against it, near enough to the gap
+    /// the rightmost menu bar item leaves.
+    public static let screenGap: Double = 8
+
+    /// Leading edge under the status item while the panel fits to the right of it, and past that
+    /// a trailing edge held inside the screen — which is the same thing as growing leftward.
+    /// Monotonic and continuous in `width`, which is the property that makes the resize glide
+    /// instead of jump.
+    ///
+    /// The outer clamp is for the case the inner one cannot express: a panel wider than the
+    /// screen it hangs on has no placement that fits, and the leading edge is the end to keep,
+    /// because that is where the content starts.
+    public static func originX(
+        width: Double, statusItemLeading: Double, boundsMinX: Double, boundsMaxX: Double
+    ) -> Double {
+        let insideTrailingEdge = boundsMaxX - screenGap - width
+        return max(boundsMinX + screenGap, min(statusItemLeading, insideTrailingEdge))
+    }
+
+    /// Top edge under the menu bar, expressed as the bottom-left origin AppKit wants.
+    ///
+    /// The panel hangs from the menu bar, so the edge that must not move is the top — and in
+    /// AppKit's coordinates that is the one an origin does not name. Holding `minY` across a
+    /// resize, which is what preserving the origin does, pins the *bottom*: shrink the content
+    /// and the top falls away from the menu bar by exactly the height that was lost. Collapsing
+    /// a section that took the panel from two columns to one dropped it 290pt down the screen,
+    /// leaving it floating unattached in the middle of the display.
+    ///
+    /// No clamp against the bottom of the screen. A panel taller than the screen should keep its
+    /// top and scroll, and the height cap means it cannot get there anyway.
+    public static func originY(height: Double, boundsMaxY: Double) -> Double {
+        boundsMaxY - max(0, height)
+    }
+
     /// Whether the panel should be in its two-column form.
     ///
     /// Two conditions, both carrying the hysteresis band on the side that keeps the current form,

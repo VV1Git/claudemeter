@@ -179,6 +179,60 @@ struct PanelLayoutTests {
                 stackedHeight: 1400, splitSaving: saving, maximumHeight: 1042, isWide: false))
     }
 
+    // MARK: - Placement
+
+    @Test("The top edge stays under the menu bar however the panel is resized")
+    func topEdgeIsPinned() {
+        // A 1792×1120 screen with a 25pt menu bar: visibleFrame runs to 1095.
+        let top = 1095.0
+
+        // The reported bug. Two columns at 700pt tall, then "Last 30 days" collapses and the
+        // panel becomes 410pt. Holding the origin — the *bottom* — drops the top by the 290pt
+        // of height that went, which is what left the panel floating mid-screen.
+        let tallOrigin = PanelLayout.originY(height: 700, boundsMaxY: top)
+        let shortOrigin = PanelLayout.originY(height: 410, boundsMaxY: top)
+        #expect(tallOrigin + 700 == top)
+        #expect(shortOrigin + 410 == top)
+        // The old behaviour, for contrast: keeping `minY` would have put the top here.
+        #expect(tallOrigin + 410 == top - 290)
+    }
+
+    @Test("Placement holds the leading edge at the item until the panel stops fitting")
+    func leadingEdgeFollowsTheStatusItem() {
+        let minX = 0.0, maxX = 1792.0
+        let item = 833.0
+
+        // Fits to the right: leading edge under the item, both forms.
+        #expect(
+            PanelLayout.originX(
+                width: 320, statusItemLeading: item, boundsMinX: minX, boundsMaxX: maxX) == item)
+        #expect(
+            PanelLayout.originX(
+                width: 676, statusItemLeading: item, boundsMinX: minX, boundsMaxX: maxX) == item)
+
+        // Past that the trailing edge is held inside the screen, so further width goes leftward.
+        let wide = PanelLayout.originX(
+            width: 1200, statusItemLeading: item, boundsMinX: minX, boundsMaxX: maxX)
+        #expect(wide == maxX - PanelLayout.screenGap - 1200)
+        #expect(wide < item)
+
+        // Continuous in width: no jump at the threshold, which is the property that makes the
+        // resize glide. AppKit's own rule jumped the leading edge nearly a full width here.
+        let threshold = maxX - PanelLayout.screenGap - item
+        let below = PanelLayout.originX(
+            width: threshold - 1, statusItemLeading: item, boundsMinX: minX, boundsMaxX: maxX)
+        let above = PanelLayout.originX(
+            width: threshold + 1, statusItemLeading: item, boundsMinX: minX, boundsMaxX: maxX)
+        #expect(abs(below - above) <= 2)
+
+        // Wider than the screen: the leading edge is the end worth keeping, since that is where
+        // the content starts.
+        #expect(
+            PanelLayout.originX(
+                width: 2000, statusItemLeading: item, boundsMinX: minX, boundsMaxX: maxX)
+                == minX + PanelLayout.screenGap)
+    }
+
     @Test("An unmeasured pass changes nothing")
     func unmeasuredPassesHoldTheCurrentForm() {
         #expect(
