@@ -350,27 +350,16 @@ public enum ProjectionEngine {
         return pointsPerUnit * recentWeight / (trailingWindow / 3600)
     }
 
-    /// Rate limits track something closer to spend than to raw token count, so tokens are
-    /// weighted by their relative API price: output is the expensive side, cache reads a
-    /// tenth of fresh input, cache writes a quarter more. The absolute scale cancels out in
-    /// the calibration against `currentPercent`, so only the *ratios* matter here — which is
-    /// why this deliberately does not depend on per-model rates.
+    /// The definition lives in `LimitWeight` so the burn-rate fit, the limit calibration and
+    /// the usage profiles cannot drift apart about what a token is worth.
     ///
-    /// The multiples are `ModelRate`'s rather than literals, so a pricing change cannot leave
-    /// the burn rate weighting tokens the old way. What this does not model is the difference
-    /// *between* models: an Opus token and a Sonnet token weigh the same here while consuming
-    /// the limit at very different rates, so a session that switches model mid-window
-    /// miscalibrates until the poll series is long enough to fit.
+    /// What this does not model is the difference *between* models: an Opus token and a Sonnet
+    /// token weigh the same here while consuming the limit at very different rates, so a
+    /// session that switches model mid-window miscalibrates until the poll series is long
+    /// enough to fit. `LimitCalibration.familySpread` measures that difference where the data
+    /// allows it to be separated, which is the beginning of a fix rather than one.
     private static func weight(_ tokens: TokenCounts) -> Double {
-        let split = tokens.cacheCreate5m + tokens.cacheCreate1h
-        let cacheWrite = split > 0
-            ? Double(tokens.cacheCreate5m) * ModelRate.cacheWrite5mMultiple
-                + Double(tokens.cacheCreate1h) * ModelRate.cacheWrite1hMultiple
-            : Double(tokens.cacheCreate) * ModelRate.cacheWrite5mMultiple
-        return Double(tokens.input)
-            + Double(tokens.output) * ModelRate.outputMultiple
-            + Double(tokens.cacheRead) * ModelRate.cacheReadMultiple
-            + cacheWrite
+        LimitWeight.of(tokens)
     }
 
     // MARK: Daily variation

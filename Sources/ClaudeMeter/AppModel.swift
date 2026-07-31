@@ -38,6 +38,14 @@ import UsageCore
     public private(set) var inflationFactor: Double?
     /// Share of the input side served from cache, over every event held. 0 before the first scan.
     public private(set) var cacheHitRatio: Double = 0
+    /// Share of weighted spend that went to sub-agents.
+    public private(set) var sidechainShare: Double = 0
+    /// Weighted spend by local hour of day.
+    public private(set) var hourProfile: [HourBucket] = []
+    /// Points-to-tokens exchange rate per window, and this cycle's pace against its own norm.
+    public private(set) var fiveHourCalibration: LimitCalibration?
+    public private(set) var sevenDayCalibration: LimitCalibration?
+    public private(set) var cyclePace: CyclePace?
     /// Deduplicated events behind the aggregates, for the "counted N requests" line.
     public private(set) var eventCount = 0
 
@@ -79,6 +87,9 @@ import UsageCore
     /// offset are not reopened — so this costs close to nothing and keeps sessions current.
     private static let rescanInterval: TimeInterval = 5 * 60
     private static let dailyHistoryDays = 30
+    /// Trailing days behind the hour-of-day profile. Long enough that one unusual night does
+    /// not define the shape, short enough that a change of working hours shows up.
+    private static let hourProfileDays = 30
 
     // MARK: Collaborators
 
@@ -267,7 +278,27 @@ import UsageCore
         efforts = Aggregates.effortSplit(from: settled)
         usageHours = settled.isEmpty ? nil : Aggregates.usageHours(from: settled, gap: gap)
         cacheHitRatio = Aggregates.cacheHitRatio(from: settled)
+        sidechainShare = Aggregates.sidechainShare(from: settled)
+        hourProfile = Aggregates.hourProfile(
+            events: settled, days: Self.hourProfileDays, now: now, calendar: .current)
         eventCount = settled.count
+        recomputeCalibration(now: now)
+    }
+
+    /// The two figures that need both data sources at once — the poll series for what the
+    /// limits did, the transcripts for what was spent while they did it.
+    ///
+    /// Recomputed from whichever of the two most recently changed, so a scan that lands between
+    /// polls updates the exchange rate rather than waiting for the next reading.
+    private func recomputeCalibration(now: Date) {
+        let settled = events.filter { $0.timestamp <= now }
+        fiveHourCalibration = ProjectionEngine.calibrate(
+            kind: .fiveHour, samples: samples, events: settled, now: now)
+        sevenDayCalibration = ProjectionEngine.calibrate(
+            kind: .sevenDay, samples: samples, events: settled, now: now)
+        cyclePace = sevenDayResetsAt.flatMap {
+            Aggregates.cyclePace(events: settled, kind: .sevenDay, resetsAt: $0, now: now)
+        }
     }
 
     private func recomputeProjections(now: Date) {
@@ -280,6 +311,7 @@ import UsageCore
             kind: .fiveHour, snapshot: snapshot, samples: samples, events: events, now: now)
         sevenDayProjection = ProjectionEngine.project(
             kind: .sevenDay, snapshot: snapshot, samples: samples, events: events, now: now)
+        recomputeCalibration(now: now)
     }
 
     // MARK: - Persisted state

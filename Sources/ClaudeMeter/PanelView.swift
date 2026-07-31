@@ -26,6 +26,7 @@ struct PanelView: View {
     @AppStorage(Prefs.expandedWeekly) private var expandedWeekly = Prefs.Default.expandedWeekly
     @AppStorage(Prefs.expandedSessions) private var expandedSessions = Prefs.Default.expandedSessions
     @AppStorage(Prefs.expandedDaily) private var expandedDaily = Prefs.Default.expandedDaily
+    @AppStorage(Prefs.expandedHours) private var expandedHours = Prefs.Default.expandedHours
 
     /// Drives every countdown and the "updated Ns ago" line. Ticked into state rather than read
     /// inline so all the relative strings in one pass of the body agree with each other.
@@ -48,7 +49,7 @@ struct PanelView: View {
     /// the same. One light section on its own stays narrow, because a 620pt-wide panel showing a
     /// single sparkline looks like a mistake.
     private var isWide: Bool {
-        let openLightSections = [expandedFiveHour, expandedWeekly, expandedSessions]
+        let openLightSections = [expandedFiveHour, expandedWeekly, expandedSessions, expandedHours]
             .filter { $0 }.count
         return expandedDaily || openLightSections >= 2
     }
@@ -310,6 +311,17 @@ struct PanelView: View {
                     SessionsSection(sessions: model.sessions)
                 }
             }
+
+            // Sits with the light sections rather than under "Last 30 days", even though both
+            // cover the same month: this one is a fixed 24 bars however long the account has
+            // been running, so it cannot grow the way the daily section can.
+            PanelSection(title: "When you work", isExpanded: $expandedHours) {
+                if model.hourProfile.isEmpty, model.isScanning {
+                    note("Reading transcripts…")
+                } else {
+                    HourProfileView(buckets: model.hourProfile)
+                }
+            }
         }
     }
 
@@ -433,6 +445,105 @@ struct PanelView: View {
 
     /// Never greyed with the health notice: these come from the local transcripts, so a failed
     /// poll leaves them just as current as they were.
+    /// Headroom in work rather than in percent.
+    ///
+    /// Purely additive: the meters above still carry the percentages, the reset times and the
+    /// forecasts. This answers the question a percentage cannot — *how much can I still do* —
+    /// by pricing a point in the tokens that were observed to consume one.
+    ///
+    /// Every figure here is a floor. Only local transcripts are visible, so any usage from
+    /// claude.ai, the desktop app or another machine raised the percentage without contributing
+    /// tokens to the measurement, which makes a point look cheaper than it is and the headroom
+    /// smaller than it is. Under-promising is the safe direction for a budget.
+    @ViewBuilder private var headroom: some View {
+        let five = model.fiveHourCalibration
+        let weekly = model.sevenDayCalibration
+        if five != nil || weekly != nil || model.cyclePace != nil {
+            VStack(alignment: .leading, spacing: 6) {
+                sectionLabel("Headroom")
+                grid(columns: 2) {
+                    if let five, let left = five.headroom(fromPercent: model.fiveHourPercent ?? 0) {
+                        StatTile(
+                            label: "5-hour left",
+                            value: UsageNumberFormat.tokens(Int(left)),
+                            help: "Weighted tokens still available on the 5-hour window, priced "
+                                + "at \(UsageNumberFormat.tokens(Int(five.weightedTokensPerPoint))) "
+                                + "per point — measured over \(five.intervals) intervals of your "
+                                + "own history. A floor: usage this app cannot see makes a point "
+                                + "look cheaper than it is.")
+                    }
+                    if let weekly,
+                        let left = weekly.headroom(fromPercent: model.sevenDayPercent ?? 0)
+                    {
+                        StatTile(
+                            label: "Weekly left",
+                            value: UsageNumberFormat.tokens(Int(left)),
+                            help: "Weighted tokens still available this week, priced at "
+                                + "\(UsageNumberFormat.tokens(Int(weekly.weightedTokensPerPoint))) "
+                                + "per point over \(weekly.intervals) intervals. Same floor "
+                                + "caveat as the 5-hour figure.")
+                    }
+                    if let paceText = cyclePaceText {
+                        StatTile(
+                            label: "Vs your norm",
+                            value: paceText,
+                            help: cyclePaceHelp)
+                    }
+                    if let spreadText = familySpreadText {
+                        StatTile(
+                            label: "Model cost",
+                            value: spreadText,
+                            help: familySpreadHelp)
+                    }
+                }
+            }
+        }
+    }
+
+    /// `+18%` near the norm, `15.6×` well away from it.
+    ///
+    /// A percentage stops being readable past a doubling — this account's first reading was
+    /// `+1456%`, which is a number nobody parses at a glance — and that is the *ordinary* case
+    /// for anyone whose usage has grown since the weeks being compared against, not an edge
+    /// one. A multiple says the same thing in three characters. Below a halving the same
+    /// applies in the other direction.
+    private var cyclePaceText: String? {
+        guard let pace = model.cyclePace, let ratio = pace.ratio, ratio.isFinite, ratio > 0
+        else { return nil }
+        if ratio >= 2 || ratio <= 0.5 { return String(format: "%.1f×", ratio) }
+        let percent = Int(((ratio - 1) * 100).rounded())
+        if percent == 0 { return "on pace" }
+        return percent > 0 ? "+\(percent)%" : "\(percent)%"
+    }
+
+    private var cyclePaceHelp: String {
+        guard let pace = model.cyclePace else { return "" }
+        let fraction = Int((pace.elapsedFraction * 100).rounded())
+        return "Weighted spend this cycle against the median of the previous "
+            + "\(pace.priorCycles) at the same \(fraction)% mark. Compared at equal elapsed "
+            + "fraction rather than equal totals — three days into a week is not comparable "
+            + "with a finished one. Measured from transcripts, which reach back much further "
+            + "than the poll history does."
+    }
+
+    /// `Opus 3.4× Sonnet` — how much faster the dearer family burns the limit per token.
+    private var familySpreadText: String? {
+        guard let spread = model.sevenDayCalibration?.familySpread ?? model.fiveHourCalibration?.familySpread,
+            spread.ratio.isFinite, spread.ratio > 1
+        else { return nil }
+        return String(format: "%@ %.1f×", spread.dearest.family, spread.ratio)
+    }
+
+    private var familySpreadHelp: String {
+        guard let spread = model.sevenDayCalibration?.familySpread
+            ?? model.fiveHourCalibration?.familySpread
+        else { return "" }
+        return "How much more of the limit \(spread.dearest.family) consumes per weighted token "
+            + "than \(spread.cheapest.family), measured only over intervals where one family did "
+            + "at least 80% of the work. Blank until your history contains stretches dominated "
+            + "by each in turn — mixed usage leaves the two impossible to tell apart."
+    }
+
     @ViewBuilder private var stats: some View {
         if model.eventCount > 0 {
             VStack(alignment: .leading, spacing: 10) {
@@ -484,8 +595,16 @@ struct PanelView: View {
                             label: "Agent hours",
                             value: agentHoursText,
                             help: agentHoursHelp)
+                        StatTile(
+                            label: "Sub-agents",
+                            value: UsageNumberFormat.share(model.sidechainShare),
+                            help: "Share of limit-weighted spend that went to sub-agents rather "
+                                + "than the main conversation. Weighted rather than raw, so it "
+                                + "answers how much of the limit they consume.")
                     }
                 }
+
+                headroom
             }
         } else {
             note(

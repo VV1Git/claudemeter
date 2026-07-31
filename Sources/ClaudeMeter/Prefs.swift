@@ -28,6 +28,9 @@ public enum Prefs {
     public static let expandedSessions = "expandedSessions"
     /// `Bool`. Default false.
     public static let expandedDaily = "expandedDaily"
+    /// `Bool`. Default false — the hour-of-day profile is a slow-moving shape, worth looking at
+    /// occasionally rather than watching.
+    public static let expandedHours = "expandedHours"
 
     /// `Double`, seconds. The cadence the app has *learned*, not the one the user asked for —
     /// persisted so a rate limit discovered in one session is still respected after a relaunch.
@@ -52,6 +55,7 @@ public enum Prefs {
         public static let expandedWeekly = false
         public static let expandedSessions = false
         public static let expandedDaily = false
+        public static let expandedHours = false
         public static let preferredPollIntervalSeconds = 180
     }
 
@@ -124,6 +128,7 @@ public enum Prefs {
             expandedWeekly: Default.expandedWeekly,
             expandedSessions: Default.expandedSessions,
             expandedDaily: Default.expandedDaily,
+            expandedHours: Default.expandedHours,
             preferredPollIntervalSeconds: Default.preferredPollIntervalSeconds,
         ])
     }
