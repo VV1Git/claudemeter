@@ -47,8 +47,8 @@ breakdown is open, since that section alone is taller than a single column can s
 - Two meters, one per window, each with the percentage, a capsule bar, a reset line that switches
   from a countdown to a weekday-and-time once the reset is twelve hours or more out, a pace line
   (`↗ 12 pts/hr · 63% at reset ± 4`), and a warning line when the window is on pace to hit 100%
-  early. A projection fitted from transcript velocity instead of the poll series is marked
-  `estimated`.
+  early. A 5-hour projection paced from the snapshot instead of fitted from the poll series is
+  marked `estimated`.
 - Three collapsible sections whose expanded state persists across launches: a chart of the last five
   hours of poll samples with the projection continued to the reset as a dashed line and its
   confidence band as a faint cone; recent sessions (project, age, duration, message count, input-side
@@ -96,8 +96,12 @@ resource bundles into `Contents/Resources` so `Bundle.module` resolves, and sign
 
 Two consequences of that ad-hoc signature are worth knowing before you build. An ad-hoc signature
 gives the app a new code identity every time it is rebuilt, so macOS treats each rebuild as a
-different program and asks for Keychain access again; signing with a stable self-signed certificate
-avoids the repeat prompts. And the app must be run from the bundle for two features to work at all:
+different program and asks for Keychain access again — every launch, in practice, since the
+credential item's access list never matches the app that is asking. Any stable identity avoids the
+repeat prompts, and `make` takes one: `make install SIGN_ID="Apple Development: you@example.com
+(TEAMID)"`, or `export SIGN_ID=...` once, from `security find-identity -v -p codesigning`. A
+self-signed certificate made in Keychain Access does the job as well as a developer one. The default
+stays ad-hoc, so nothing is required to build. And the app must be run from the bundle for two features to work at all:
 `UNUserNotificationCenter.current()` traps in a process with no bundle identifier, so every
 notification path degrades to a no-op when the binary is run straight out of `.build`, and
 `SMAppService` reports `notFound` there, which the settings pane surfaces as a note instead of a
@@ -155,10 +159,17 @@ together: at least four usable samples, and at least ten minutes between the fir
 them. Both matter, because at the starting cadence of 180 seconds four samples span nine minutes —
 the span is the condition still outstanding at that point, and a further poll is what clears it. Once
 the fit exists the projection is labelled `measured`. Until then — after a fresh install, and again
-after any gap long enough to empty the trailing window — the app weights recent transcript tokens by
-their relative API price, calibrates that weight against the current utilization to get
-points-per-token without knowing your actual limits, and labels the result `estimated`. The weighting
-only needs the ratios between token classes, which is why it does not depend on per-model rates.
+after any gap long enough to empty the trailing window — the 5-hour window is *paced* like the
+weekly one: the utilization the API reports, divided by how long the window has been open, carried
+forward at that average. That needs no history at all, and it counts every source the account is
+charged for, which is the point. It is labelled `estimated` to distinguish it from the fit.
+
+This used to be done from local transcript tokens, calibrated against the current utilization to get
+points-per-token. That reads zero whenever the window's usage came from claude.ai, the desktop app or
+a second machine — none of which write transcripts here — and a zero rate took the whole forecast off
+the row with it. Transcripts still supply the *shape* of the interval, never its level: a coefficient
+of variation is a ratio, and a ratio is unchanged by whatever constant fraction of the work happens
+somewhere this app cannot see.
 
 **Cost figures are equivalent-cost estimates, not a bill.** A subscription is not billed per token.
 Every dollar figure in the app is what the same tokens would cost at Anthropic's published API
@@ -491,8 +502,8 @@ Aggregates work the other way round. They are pure functions of the in-memory ev
 the idle-gap slider recomputes sessions, daily buckets and usage hours instantly and triggers no
 rescan at all. Poll samples take the same care in reverse: a sample is appended to the in-memory
 series even when the file write fails, because persistence is allowed to degrade but the burn-rate
-fit is not — an unwritable support directory would otherwise pin every projection at `estimated` for
-the life of the process.
+fit is not — an unwritable support directory would otherwise pin every 5-hour projection at
+`estimated` for the life of the process.
 
 ### Wall-clock hours and agent-hours answer different questions
 

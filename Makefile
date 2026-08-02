@@ -1,5 +1,15 @@
 APP_NAME    := ClaudeMeter
 CONFIG      := release
+## Code signing identity. Ad-hoc (`-`) by default, which needs no setup and is enough to run.
+##
+## The cost of ad-hoc is a new code identity on every rebuild, so macOS treats each build as a
+## different program and re-asks for Keychain access — every launch, in practice, since the item's
+## ACL never matches the app that is asking. Any stable identity fixes that, because "Always Allow"
+## then keeps applying:
+##
+##     security find-identity -v -p codesigning        # pick one
+##     make install SIGN_ID="Apple Development: you@example.com (TEAMID)"
+SIGN_ID     ?= -
 DIST        := dist
 APP         := $(DIST)/$(APP_NAME).app
 CONTENTS    := $(APP)/Contents
@@ -32,8 +42,8 @@ app: build
 	@for b in "$(BIN_PATH)"/*.bundle; do \
 		[ -e "$$b" ] && cp -R "$$b" "$(CONTENTS)/Resources/" || true; \
 	done
-	@# Ad-hoc signature. Enough for local use; see README for the Keychain caveat.
-	codesign --force --sign - --timestamp=none "$(APP)"
+	@# See `SIGN_ID` above for why the default costs a Keychain prompt per launch.
+	codesign --force --sign "$(SIGN_ID)" --timestamp=none "$(APP)"
 	@echo "Built $(APP)"
 
 run: app
