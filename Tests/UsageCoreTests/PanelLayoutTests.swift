@@ -233,6 +233,35 @@ struct PanelLayoutTests {
                 == minX + PanelLayout.screenGap)
     }
 
+    @Test("A target is rounded to whole points, because that is what a window can take")
+    func targetsAreAttainable() {
+        // An animated size is fractional; a window frame is not. Asked for 941.568 the window
+        // takes 941, which is 0.568 away — past any sub-point tolerance — so the rule asks
+        // again, and again, for as long as the panel is open, and each of those writes invites
+        // AppKit to re-anchor. Rounding first is what makes "did I get what I asked for" a
+        // question that can be answered yes.
+        let animating = PanelLayout.Frame(
+            x: 905.88, y: 941.568, width: 598.118, height: 782.756)
+        let rounded = animating.rounded()
+
+        #expect(rounded == PanelLayout.Frame(x: 906, y: 942, width: 598, height: 783))
+        #expect(rounded.rounded() == rounded)
+        #expect(!PanelLayout.shouldApply(target: rounded, current: rounded))
+    }
+
+    @Test("A window sitting somewhere else is corrected")
+    func displacedWindowsAreCorrected() {
+        let target = PanelLayout.Frame(x: 906, y: 942, width: 598, height: 783)
+        // AppKit's own placement: the trailing edge pinned to the status item, most of a panel
+        // width away. It re-anchors after a resize as well as during one, so this is not a
+        // transient the rule can afford to ignore.
+        let reanchored = PanelLayout.Frame(x: 382, y: 942, width: 598, height: 783)
+        #expect(PanelLayout.shouldApply(target: target, current: reanchored))
+        // Sub-point disagreement is AppKit and this rule agreeing.
+        let nudged = PanelLayout.Frame(x: 906.2, y: 942.1, width: 598.3, height: 783.4)
+        #expect(!PanelLayout.shouldApply(target: target, current: nudged))
+    }
+
     @Test("An unmeasured pass changes nothing")
     func unmeasuredPassesHoldTheCurrentForm() {
         #expect(

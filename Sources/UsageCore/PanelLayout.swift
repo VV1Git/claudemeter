@@ -86,6 +86,56 @@ public enum PanelLayout {
         return max(boundsMinX + screenGap, min(statusItemLeading, insideTrailingEdge))
     }
 
+    /// A window rectangle in AppKit's coordinates, as plain numbers.
+    ///
+    /// Declared here rather than borrowing `CGRect` so this module keeps saying what it says
+    /// everywhere else — points, no graphics framework — and so the placement rule stays
+    /// testable without a window to hang it on.
+    public struct Frame: Equatable, Sendable {
+        public var x: Double
+        public var y: Double
+        public var width: Double
+        public var height: Double
+
+        public init(x: Double, y: Double, width: Double, height: Double) {
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+        }
+
+        /// The same rectangle in whole points — which is the only kind a window has.
+        ///
+        /// The sizes arriving here are interpolated, so they are fractional; the frame the
+        /// window ends up with is not. Asked for 941.568 it takes 941, and a rule that then
+        /// compares the two finds them 0.568 apart, decides the window did not do as it was
+        /// told, and asks again — on every notification, for as long as the panel is open.
+        /// Rounding the target first is what makes "did the window take what it was given" a
+        /// question with a stable answer, and everything else here depends on that.
+        public func rounded() -> Frame {
+            Frame(
+                x: x.rounded(), y: y.rounded(), width: width.rounded(),
+                height: height.rounded())
+        }
+    }
+
+    /// Sub-point agreement, in points. Below this AppKit and this rule are saying the same thing.
+    public static let frameTolerance: Double = 0.5
+
+    /// Whether the window is somewhere other than where it belongs.
+    ///
+    /// Deliberately compares against the window's *current* frame and nothing else. AppKit
+    /// re-anchors a menu bar panel on its own account — during a resize and again after one —
+    /// so the placement has to be defended continuously rather than asserted once and assumed;
+    /// a rule that remembers what it last asked for stops correcting exactly when AppKit moves
+    /// the panel behind its back.
+    public static func shouldApply(target: Frame, current: Frame) -> Bool {
+        !(abs(target.x - current.x) <= frameTolerance
+            && abs(target.y - current.y) <= frameTolerance
+            && abs(target.width - current.width) <= frameTolerance
+            && abs(target.height - current.height) <= frameTolerance)
+    }
+
     /// Top edge under the menu bar, expressed as the bottom-left origin AppKit wants.
     ///
     /// The panel hangs from the menu bar, so the edge that must not move is the top — and in

@@ -22,12 +22,36 @@ import UsageCore
 /// `PanelSize`) — so the sideways glide costs nothing beyond this arithmetic and arrives in step
 /// with the resize.
 ///
-/// It corrects AppKit's placement rather than replacing it, which is the only order on offer: the
-/// hosting view resizes the window from the layout pass and AppKit re-anchors after that, both
-/// arriving here as notifications. Correcting from them does not flicker, because window geometry
-/// is committed once per turn of the run loop rather than per call — measured, while the frame went
-/// 684 → 664 → −388 → 664 in-process across one resize, the window server held the *previous* frame
-/// throughout and then took only the last value. AppKit's off-screen intermediate is never drawn.
+/// It corrects AppKit's placement rather than replacing it, and the correction has to be the *last*
+/// write on the window or it is not a correction at all. That is the whole difficulty. Three things
+/// hold it together, and each of them was arrived at by watching the frames go past.
+///
+/// **A resize provokes a re-anchor; a move does not.** This is the load-bearing fact. Every
+/// `setFrame` that changes the size is followed by AppKit placing the panel by its own rule —
+/// measured, this rule asked for x = 937 and the window came back at 500, over and over — while
+/// `setFrameOrigin` is taken and kept. So the size is written once and the origin is then asserted
+/// separately, in a loop, until the window agrees or the bound runs out.
+///
+/// **Nothing here may decline to look.** AppKit re-anchors from inside `setFrame` *and* again in a
+/// later turn of the run loop, and both moves post notifications. A re-entrancy guard that
+/// discards anything arriving mid-write discards exactly the report that matters, and the panel is
+/// left where AppKit put it — measured, alternating between x = 845 and x = 380 frame by frame,
+/// which is what the jitter was. So `reposition` is re-entrant and bounded by depth rather than
+/// barred, and it always compares against where the window *is* rather than against what it was
+/// last told to do. A rule that remembers its own requests stops defending the panel the moment
+/// AppKit moves it behind that rule's back.
+///
+/// **Every frame asked for must be a frame the window can take.** Interpolated sizes are
+/// fractional and window frames are not, so an unrounded target is 0.568pt short of itself
+/// forever: the rule sees a window that did not obey, writes again, and provokes another
+/// re-anchor — on every notification, for as long as the panel is open. `Frame.rounded` is the fix
+/// for that, and it is load-bearing rather than tidiness.
+///
+/// Flicker is not the price of any of this, because window geometry is committed once per turn of
+/// the run loop rather than per call — measured, while the frame went 684 → 664 → −388 → 664
+/// in-process across one resize, the window server held the *previous* frame throughout and then
+/// took only the last value. AppKit's off-screen intermediate is never drawn, provided nothing
+/// forces a display mid-turn; see the `display:` argument below.
 extension PanelAnchor {
     /// The display the menu bar item hangs from, for callers that need to measure against the
     /// same screen this places the panel on. `nil` before the status item exists.
@@ -62,11 +86,20 @@ extension PanelAnchor {
     final class AnchorView: NSView {
         private var observers: [any NSObjectProtocol] = []
 
-        /// The reposition below posts `didMove` itself, and this is what stops that arriving
-        /// straight back here. The distance check further down would break the cycle too — the
-        /// frame is updated before the notification lands — but only while every origin asked for
-        /// is honoured, and the cost of being wrong about that is unbounded recursion.
-        private var isRepositioning = false
+        /// How many `reposition` calls are on the stack.
+        ///
+        /// A boolean here — ignore anything arriving while we are writing — is the obvious guard
+        /// and it is wrong, because the notification it discards is the only report of the one
+        /// thing that has to be corrected: AppKit re-anchors the panel *from inside* `setFrame`,
+        /// and swallowing that leaves its placement standing. Measured, that is a panel sitting
+        /// at x=382 while this rule was asking for 845, alternating frame by frame.
+        ///
+        /// So nested corrections are allowed, and bounded instead. The recursion terminates on
+        /// its own — a `reposition` whose window already has the target frame writes nothing and
+        /// posts nothing — and the depth cap is only there for the case where the window refuses
+        /// a frame outright, which must read as giving up rather than as a hang.
+        private var repositionDepth = 0
+        private static let maximumRepositionDepth = 4
 
         /// Zero until the first layout has measured the content.
         private var desiredSize: CGSize = .zero
@@ -97,7 +130,9 @@ extension PanelAnchor {
                     NotificationCenter.default.addObserver(
                         forName: name, object: window, queue: nil
                     ) { [weak self] _ in
-                        MainActor.assumeIsolated { self?.reposition() }
+                        MainActor.assumeIsolated {
+                            self?.reposition()
+                        }
                     })
             }
 
@@ -113,7 +148,7 @@ extension PanelAnchor {
 
         /// Moves the window to where the rule puts a panel of its current width.
         private func reposition() {
-            guard !isRepositioning, let window else { return }
+            guard repositionDepth < Self.maximumRepositionDepth, let window else { return }
             // The screen the *status item* is on, not the one the window reports: a window pushed
             // past an edge belongs to whichever display it overlaps most, which on a multi-display
             // desk is how a mid-resize panel ends up measured against the wrong screen. The panel
@@ -136,16 +171,37 @@ extension PanelAnchor {
             // early on exactly those resizes and leave it there.
             let y = PanelLayout.originY(height: size.height, boundsMaxY: bounds.maxY)
 
-            // Under a point apart on every term is AppKit and this rule agreeing; setting the
-            // frame anyway would post another notification to no effect.
-            let target = CGRect(x: x, y: y, width: size.width, height: size.height)
-            guard abs(frame.minX - target.minX) > 0.5 || abs(frame.minY - target.minY) > 0.5
-                || abs(frame.width - target.width) > 0.5
-                || abs(frame.height - target.height) > 0.5
+            // Rounded, because a window frame is whole points and an interpolated size is not.
+            // See `PanelLayout.Frame.rounded`.
+            let target = PanelLayout.Frame(
+                x: x, y: y, width: size.width, height: size.height
+            ).rounded()
+            guard
+                PanelLayout.shouldApply(target: target, current: PanelLayout.Frame(frame))
             else { return }
-            isRepositioning = true
-            window.setFrame(target, display: true)
-            isRepositioning = false
+
+            repositionDepth += 1
+            defer { repositionDepth -= 1 }
+            // `display: false`, because the point of correcting AppKit rather than replacing it
+            // is that the window server commits geometry once per turn of the run loop and never
+            // draws the intermediate. Forcing a display here flushes each intermediate to the
+            // screen instead, which is the difference between a glide and a flicker.
+            window.setFrame(CGRect(target), display: false)
+
+            // AppKit re-anchors the panel from inside that call — to the trailing-edge placement
+            // this file exists to replace, which on a resize is a jump of most of a panel width.
+            // It does not re-enter here to be corrected: the notification it posts arrives later
+            // in the turn, by which time the frame it displaced has already been the one on
+            // offer. So the origin is re-asserted here, in the same call, and re-checked, because
+            // the assertion can itself provoke another anchoring pass. Bounded, because a fight
+            // that does not converge must read as giving up rather than as a hang.
+            let origin = CGPoint(x: target.x, y: target.y)
+            for _ in 0..<Self.maximumRepositionDepth {
+                guard abs(window.frame.minX - origin.x) > PanelLayout.frameTolerance
+                    || abs(window.frame.minY - origin.y) > PanelLayout.frameTolerance
+                else { break }
+                window.setFrameOrigin(origin)
+            }
         }
 
         /// `MenuBarExtra` does not expose its `NSStatusItem`, so the item is found by window level.
@@ -155,5 +211,21 @@ extension PanelAnchor {
         fileprivate static var statusItemWindow: NSWindow? {
             NSApp.windows.first { $0.level == .statusBar }
         }
+    }
+}
+
+// MARK: - Frame conversion
+
+/// `PanelLayout` speaks in plain points so the placement rule can be tested without a window;
+/// these are the two lines that cost.
+extension PanelLayout.Frame {
+    init(_ rect: CGRect) {
+        self.init(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)
+    }
+}
+
+extension CGRect {
+    init(_ frame: PanelLayout.Frame) {
+        self.init(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
 }
