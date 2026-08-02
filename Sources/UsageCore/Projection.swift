@@ -301,55 +301,6 @@ public enum ProjectionEngine {
         return confidenceT(df: fit.sampleCount - 2) * fit.residualSigma * scale.squareRoot()
     }
 
-    // MARK: Fallback rate
-
-    /// Burn rate inferred from transcript token velocity when the poll series is too thin
-    /// to fit — typically the first few minutes after launch.
-    ///
-    /// Calibration: the weighted tokens spent inside the current window account for
-    /// `currentPercent`, which gives points-per-token without any knowledge of the account's
-    /// actual limits. That factor is then applied to the most recent `trailingWindow` of
-    /// token spend. Returns points per hour; 0 when there is nothing to go on, which reads
-    /// as "not burning" rather than as a guess.
-    ///
-    /// `resetsAt` is what makes the window boundary right for the fixed weekly window, whose
-    /// start is `resetsAt − 7d` and not `now − 7d`. The two differ by however long is left on
-    /// the clock, and charging the current window with spend from before it opened deflates
-    /// the calibration by that ratio — most of a factor of two, mid-week.
-    ///
-    /// Only local Claude Code transcripts are visible here, so usage from claude.ai, the
-    /// desktop app or another machine is attributed to the tokens this machine can see and
-    /// inflates the rate accordingly.
-    public static func estimatedRate(
-        events: [UsageEvent], kind: WindowKind, currentPercent: Double, now: Date,
-        resetsAt: Date? = nil
-    ) -> Double {
-        guard currentPercent > 0 else { return 0 }
-        // Only the weekly window has a start worth deriving from its reset. The 5-hour window
-        // is rolling: its `resets_at` drifts with the usage ageing out, so `resetsAt − 5h` is
-        // not where it opened, and `now − 5h` is exactly the span still counting against it.
-        let windowStart: Date
-        if kind == .sevenDay, let resetsAt {
-            windowStart = resetsAt.addingTimeInterval(-kind.nominalDuration)
-        } else {
-            windowStart = now.addingTimeInterval(-kind.nominalDuration)
-        }
-        let inWindow = events.filter {
-            $0.timestamp > windowStart && $0.timestamp <= now && $0.model != syntheticModel
-        }
-        let windowWeight = inWindow.reduce(0.0) { $0 + weight($1.tokens) }
-        guard windowWeight > 0 else { return 0 }
-
-        let recentStart = now.addingTimeInterval(-trailingWindow)
-        let recentWeight = inWindow
-            .filter { $0.timestamp > recentStart }
-            .reduce(0.0) { $0 + weight($1.tokens) }
-        guard recentWeight > 0 else { return 0 }
-
-        let pointsPerUnit = currentPercent / windowWeight
-        return pointsPerUnit * recentWeight / (trailingWindow / 3600)
-    }
-
     /// The definition lives in `LimitWeight` so the burn-rate fit, the limit calibration and
     /// the usage profiles cannot drift apart about what a token is worth.
     ///
@@ -431,9 +382,79 @@ public enum ProjectionEngine {
         return (min(max(coefficient, variationFloor), variationCeiling), observed.count)
     }
 
+    /// Trailing complete hours of local usage used to estimate how much an hour varies.
+    ///
+    /// Two days rather than the fortnight the daily figure takes: the 5-hour window's horizon is
+    /// hours, and behaviour from last week says less about the next four hours than yesterday
+    /// evening does.
+    public static let variationHours = 48
+    /// Fewer complete hours than this and there is no spread worth quoting.
+    public static let minimumVariationHours = 8
+
+    /// How much this account's hourly usage varies, as a coefficient of variation, plus how
+    /// many complete hours it was measured over.
+    ///
+    /// The hour-scale twin of `dailyVariation`, and it carries the same caveat and the same
+    /// defence: only the shape is taken from the transcripts, never the level, because a ratio
+    /// of spread to mean is unchanged by whatever constant fraction of the account's work this
+    /// machine cannot see.
+    ///
+    /// The current hour is excluded because it is partial, and a partial hour is not a quiet one.
+    public static func hourlyVariation(
+        events: [UsageEvent], now: Date, calendar: Calendar = .current
+    ) -> (coefficient: Double, hours: Int)? {
+        let thisHour = startOfHour(for: now, calendar: calendar)
+        let earliest = thisHour.addingTimeInterval(-Double(variationHours) * 3600)
+
+        var totals: [Date: Double] = [:]
+        for event in events where event.model != syntheticModel {
+            guard event.timestamp >= earliest, event.timestamp < thisHour else { continue }
+            totals[startOfHour(for: event.timestamp, calendar: calendar), default: 0]
+                += weight(event.tokens)
+        }
+        guard let firstUsed = totals.keys.min() else { return nil }
+
+        // Zero-filled, and cut at the earliest hour with any recorded work: an idle hour is a
+        // real observation, but an hour before the transcripts begin is absence of evidence.
+        var observed: [Double] = []
+        for offset in 1...variationHours {
+            let hour = thisHour.addingTimeInterval(-Double(offset) * 3600)
+            guard hour >= firstUsed else { continue }
+            observed.append(totals[hour] ?? 0)
+        }
+        guard observed.count >= minimumVariationHours else { return nil }
+
+        let count = Double(observed.count)
+        let mean = observed.reduce(0, +) / count
+        guard mean > 0 else { return nil }
+        let variance = observed.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / (count - 1)
+        let coefficient = variance.squareRoot() / mean
+        guard coefficient.isFinite else { return nil }
+        return (min(max(coefficient, variationFloor), variationCeiling), observed.count)
+    }
+
+    private static func startOfHour(for date: Date, calendar: Calendar) -> Date {
+        calendar.date(
+            from: calendar.dateComponents([.year, .month, .day, .hour], from: date)) ?? date
+    }
+
     // MARK: Projection
 
     /// Projects `kind` forward to its reset. `nil` only when the snapshot has no such window.
+    ///
+    /// Three sources, in descending order of what they know:
+    ///
+    /// 1. the regression over the poll series, for the rolling 5-hour window only;
+    /// 2. the window's own consumption over its own elapsed time, which needs no history;
+    /// 3. nothing — the current reading carried forward flat.
+    ///
+    /// Every one of them is drawn from the API's utilization, which is what the account is
+    /// actually being charged and therefore counts Claude Code on any machine, the desktop app
+    /// and claude.ai alike. This used to fall back to a rate calibrated from *local transcript*
+    /// tokens, which cannot see any of that: on an account whose work is split across devices
+    /// and surfaces that rate reads zero while the window climbs, and a zero rate took the whole
+    /// forecast off the row with it. Transcripts are still read, but only for the *shape* of the
+    /// interval — a ratio, unchanged by whatever constant fraction of the work happens elsewhere.
     ///
     /// `resetsAt` is taken from the snapshot on every call rather than remembered, because the
     /// 5-hour window's reset time drifts forward between polls.
@@ -447,10 +468,15 @@ public enum ProjectionEngine {
         let currentPercent = window.utilization
         let resetsAt = window.resetsAt
 
-        // The weekly window is fixed and days away, so it is paced rather than fitted. Falls
-        // through to the regression only when the snapshot carries no reset instant, without
-        // which "how far into the window are we" has no answer.
-        if kind == .sevenDay, let resetsAt,
+        // The weekly window is never fitted: it is fixed and days away, and regressing a
+        // 45-minute slope across a 168-hour horizon printed 171% on a week that finished at 23%.
+        if kind == .fiveHour, let measured = fit(samples, kind: kind, now: now) {
+            return fittedProjection(
+                fit: measured, kind: kind, currentPercent: currentPercent, resetsAt: resetsAt,
+                now: now)
+        }
+
+        if let resetsAt,
             let paced = pacedProjection(
                 kind: kind, currentPercent: currentPercent, resetsAt: resetsAt,
                 events: events, now: now)
@@ -458,36 +484,20 @@ public enum ProjectionEngine {
             return paced
         }
 
-        return fittedProjection(
+        return flatProjection(
             kind: kind, currentPercent: currentPercent, resetsAt: resetsAt,
-            samples: samples, events: events, now: now)
+            samples: samples, now: now)
     }
 
     /// The rolling-window path: a regression over the trailing poll series, carried to the
     /// reset, with a prediction interval from the residuals.
     private static func fittedProjection(
-        kind: WindowKind, currentPercent: Double, resetsAt: Date?,
-        samples: [Sample], events: [UsageEvent], now: Date
+        fit measured: BurnRateFit, kind: WindowKind, currentPercent: Double, resetsAt: Date?,
+        now: Date
     ) -> Projection {
         let hoursUntilReset = resetsAt.map { max(0, $0.timeIntervalSince(now)) / 3600 }
-
-        let basis: ProjectionBasis
-        let percentPerHour: Double
-        let sampleCount: Int
-        var band: Double?
-
-        if let measured = fit(samples, kind: kind, now: now) {
-            basis = .measured
-            percentPerHour = measured.percentPerHour
-            sampleCount = measured.sampleCount
-            band = hoursUntilReset.map { halfWidth(fit: measured, hours: $0) }
-        } else {
-            basis = .estimated
-            percentPerHour = estimatedRate(
-                events: events, kind: kind, currentPercent: currentPercent, now: now,
-                resetsAt: resetsAt)
-            sampleCount = usableSamples(samples, kind: kind, now: now).count
-        }
+        let percentPerHour = measured.percentPerHour
+        let band = hoursUntilReset.map { halfWidth(fit: measured, hours: $0) }
 
         let projectedAtReset: Double? = hoursUntilReset.flatMap { hours in
             clampedProjection(currentPercent + percentPerHour * hours)
@@ -500,15 +510,10 @@ public enum ProjectionEngine {
         // the only window this path serves is the 5-hour one, whose horizon is at most five
         // hours. A fit that noisy over that span produces a centre near the current reading and
         // a wide interval around it, which is a true statement rather than a misleading one.
-        //
-        // What is left unguarded is the `.estimated` basis, which has no interval to state: a
-        // fit that failed outright falls back to transcript velocity and reports a bare number.
-        // That case carries the "estimated" badge in `MeterRow` instead, which is what it was
-        // added for.
 
         return Projection(
             kind: kind,
-            basis: basis,
+            basis: .measured,
             percentPerHour: percentPerHour,
             currentPercent: currentPercent,
             timeToCap: capTime(
@@ -517,11 +522,33 @@ public enum ProjectionEngine {
             projectedAtReset: projectedAtReset,
             projectedBand: band,
             resetsAt: resetsAt,
-            sampleCount: sampleCount
+            sampleCount: measured.sampleCount
         )
     }
 
-    /// The fixed-window path: the window's own accumulated total over how long it has been
+    /// The last resort: no rate, and the current reading carried forward unchanged.
+    ///
+    /// Reached when there are too few polls to fit and the window is too young to pace. It
+    /// exists so that path still produces a `Projection` — a row that prints nothing about where
+    /// a window is heading is indistinguishable from a broken app, and "holding at 28%" is a
+    /// true and readable thing to say about a window nobody is spending against.
+    private static func flatProjection(
+        kind: WindowKind, currentPercent: Double, resetsAt: Date?, samples: [Sample], now: Date
+    ) -> Projection {
+        Projection(
+            kind: kind,
+            basis: .flat,
+            percentPerHour: 0,
+            currentPercent: currentPercent,
+            timeToCap: nil,
+            projectedAtReset: resetsAt == nil ? nil : clampedProjection(currentPercent),
+            projectedBand: nil,
+            resetsAt: resetsAt,
+            sampleCount: usableSamples(samples, kind: kind, now: now).count
+        )
+    }
+
+    /// The snapshot path: the window's own accumulated total over how long it has been
     /// open, carried forward at that average.
     ///
     /// This needs no poll history at all — the snapshot already says how much of the window is
@@ -543,7 +570,9 @@ public enum ProjectionEngine {
         let elapsedHours = now.timeIntervalSince(windowStart) / 3600
         // A window ten minutes old has consumed a whole percentage point of nothing: dividing
         // by that elapsed time turns the quantization step itself into a runaway rate.
-        guard elapsedHours >= minimumElapsedHours, currentPercent.isFinite else { return nil }
+        guard elapsedHours >= minimumElapsedHours(for: kind), currentPercent.isFinite else {
+            return nil
+        }
 
         let remainingHours = max(0, resetsAt.timeIntervalSince(now) / 3600)
         let ratePerHour = max(0, currentPercent) / elapsedHours
@@ -552,17 +581,22 @@ public enum ProjectionEngine {
 
         var band: Double?
         if remainingHours > 0 {
-            // No measured variation is not evidence of *low* variation, so an account with
-            // too few complete days to measure gets the widest coefficient this engine will
-            // ever believe over the fewest days it will ever accept. Falling through with no
-            // band at all was the worse failure: it printed a bare paced number, which is the
-            // one thing `withdrawIfUninformative` exists to prevent.
-            let variation = dailyVariation(events: events, now: now)
-                ?? (coefficient: variationCeiling, days: minimumVariationDays)
-            let daysRemaining = remainingHours / 24
-            let sigmaPerDay = variation.coefficient * ratePerHour * 24
-            let spread = daysRemaining + daysRemaining * daysRemaining / Double(variation.days)
-            let halfWidth = confidenceT(df: variation.days - 1) * sigmaPerDay * spread.squareRoot()
+            // How much this account varies over the unit the horizon is measured in: days for a
+            // week away, hours for an afternoon. Only the *shape* is taken from the transcripts,
+            // never the level — a coefficient of variation is a ratio, and a ratio survives
+            // whatever constant fraction of the account's work this machine cannot see.
+            //
+            // No measured variation is not evidence of *low* variation, so an account with too
+            // little history gets the widest coefficient this engine will ever believe over the
+            // fewest units it will ever accept. Falling through with no band at all was the
+            // worse failure: it printed a bare paced number.
+            let unitHours = variationUnitHours(for: kind)
+            let variation = measuredVariation(kind: kind, events: events, now: now)
+                ?? (coefficient: variationCeiling, count: minimumVariationCount(for: kind))
+            let unitsRemaining = remainingHours / unitHours
+            let sigmaPerUnit = variation.coefficient * ratePerHour * unitHours
+            let spread = unitsRemaining + unitsRemaining * unitsRemaining / Double(variation.count)
+            let halfWidth = confidenceT(df: variation.count - 1) * sigmaPerUnit * spread.squareRoot()
             band = halfWidth.isFinite ? halfWidth : nil
         }
 
@@ -592,7 +626,40 @@ public enum ProjectionEngine {
         )
     }
 
-    private static let minimumElapsedHours: Double = 1
+    /// How long a window must have been open before its own average is worth quoting, as a
+    /// fraction of the window's own length.
+    ///
+    /// A flat hour was two rules wearing one name: 0.6% of a week, and 20% of a five-hour
+    /// window. A twentieth is one rule — 15 minutes for the 5-hour window, 8.4 hours for the
+    /// weekly one — and it is the same statement in both places: a window is not paced from its
+    /// first few percent, where the reporting quantum is a large share of everything observed.
+    public static let minimumElapsedFraction: Double = 1.0 / 20
+
+    public static func minimumElapsedHours(for kind: WindowKind) -> Double {
+        kind.nominalDuration / 3600 * minimumElapsedFraction
+    }
+
+    /// The unit the horizon is counted in: days for the weekly window, hours for the 5-hour one.
+    private static func variationUnitHours(for kind: WindowKind) -> Double {
+        kind == .sevenDay ? 24 : 1
+    }
+
+    private static func minimumVariationCount(for kind: WindowKind) -> Int {
+        kind == .sevenDay ? minimumVariationDays : minimumVariationHours
+    }
+
+    private static func measuredVariation(
+        kind: WindowKind, events: [UsageEvent], now: Date
+    ) -> (coefficient: Double, count: Int)? {
+        switch kind {
+        case .sevenDay:
+            return dailyVariation(events: events, now: now)
+                .map { (coefficient: $0.coefficient, count: $0.days) }
+        case .fiveHour:
+            return hourlyVariation(events: events, now: now)
+                .map { (coefficient: $0.coefficient, count: $0.hours) }
+        }
+    }
 
     /// Non-finite in, nothing out: a corrupt payload must read as a missing projection rather
     /// than reach Swift Charts, where `min`/`max` pass NaN straight through.

@@ -145,14 +145,35 @@ struct MeterRow: View {
         return "resets " + resetsAt.formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
-    /// `↗ 12 pts/hr · 63% at reset ± 4`, with either clause dropped when it says nothing, and
-    /// the whole line dropped when both do.
+    /// `↗ 12 pts/hr · 63% at reset ± 4`, with either clause dropped when it says nothing.
+    ///
+    /// Never empty while there is a projection to describe. Both clauses are keyed on movement —
+    /// a rate under half a point is fit noise, and a forecast landing on the reading already
+    /// shown is not a forecast — so a window nobody is spending against lost both of them and
+    /// the row went silent exactly when it was quietest. That silence is indistinguishable from
+    /// a broken app, and it was the reported bug. Standing still is a fact about the window, and
+    /// `holdingText` states it.
     private var paceText: String? {
+        guard projection != nil else { return nil }
         let clauses = [rateClause, atResetClause].compactMap { $0 }
-        return clauses.isEmpty ? nil : clauses.joined(separator: " · ")
+        return clauses.isEmpty ? holdingText : clauses.joined(separator: " · ")
     }
 
-    private var isEstimated: Bool { projection?.basis == .estimated }
+    /// What is left to say when there is no movement and no interval: where the window is, and
+    /// that it is expected to stay there.
+    private var holdingText: String? {
+        guard let projection, projection.currentPercent.isFinite, projection.resetsAt != nil
+        else { return nil }
+        return "→ holding at \(Self.integer(max(projection.currentPercent, 0)))% at reset"
+    }
+
+    /// The 5-hour window prefers a regression over its poll series and only paces when it has
+    /// too few polls to fit, so a paced figure there is the weaker of two answers and says so.
+    /// The weekly window is paced by design — it is never fitted — so there is nothing to
+    /// distinguish it from, and a badge on every weekly reading would mark the normal case.
+    private var isEstimated: Bool {
+        projection?.basis == .paced && projection?.kind == .fiveHour
+    }
 
     /// Points per hour for the 5-hour window, points per day for the weekly one.
     ///
@@ -193,8 +214,13 @@ struct MeterRow: View {
     private var atResetClause: String? {
         guard let projection, let projected = projection.projectedAtReset, projected.isFinite
         else { return nil }
+        // Capped at the width of the scale itself. A half-width past 100 points cannot be read
+        // as a margin on a percentage — measured on a cold-start paced 5-hour window it comes
+        // out at ± 417, which is not a wide interval so much as the absence of one, and printing
+        // it beside a number implies a precision the arithmetic never had. What that case has to
+        // say is said better by the "estimated" badge that accompanies it.
         let band = projection.projectedBand.flatMap {
-            $0.isFinite && $0.rounded() >= 1 ? $0 : nil
+            $0.isFinite && $0.rounded() >= 1 && $0 <= 100 ? $0 : nil
         }
         // A forecast that lands where the window already is used to be dropped as noise, on
         // the grounds that restating the current number says nothing. With an interval beside

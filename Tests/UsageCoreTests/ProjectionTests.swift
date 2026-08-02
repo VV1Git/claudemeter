@@ -259,32 +259,25 @@ struct ProjectionTests {
         #expect(usable.count == 9)
         #expect(usable.first?.fiveHourPct == 10)
     }
+    // MARK: - Fallback when the poll series cannot be fitted
 
-    // MARK: - Fallback to the estimated basis
-
-    @Test("Below the sample minimum, the projection falls back to a token-velocity estimate")
-    func belowMinimumSamplesFallsBack() throws {
+    @Test("Below the sample minimum, the 5-hour window is paced rather than fitted")
+    func belowMinimumSamplesFallsBackToPacing() throws {
         let series = samples(count: 3) { 18 + Double($0) }
         #expect(ProjectionEngine.fit(series, kind: .fiveHour, now: Self.now) == nil)
 
-        let events = [
-            event("old", at: Self.now.addingTimeInterval(-3 * 3600), output: 10_000),
-            event("recent", at: Self.now.addingTimeInterval(-20 * 60), output: 10_000),
-        ]
         let projection = try #require(
             ProjectionEngine.project(
                 kind: .fiveHour,
                 snapshot: snapshot(
                     fiveHour: LimitWindow(
                         utilization: 20, resetsAt: Self.now.addingTimeInterval(3 * 3600))),
-                samples: series, events: events, now: Self.now))
+                samples: series, events: [], now: Self.now))
 
-        #expect(projection.basis == .estimated)
-        #expect(projection.sampleCount == 3)
-        // Half the window's weighted spend landed in the trailing 45 minutes, so
-        // 20% × 0.5 accrued over 0.75h → 13.33 points/hour.
-        #expect(abs(projection.percentPerHour - 40.0 / 3) < 1e-6)
-        #expect(projection.projectedBand == nil)
+        #expect(projection.basis == .paced)
+        // Two of the five hours gone and a fifth of the budget with them, from the snapshot
+        // alone: no events were supplied, and none are needed.
+        #expect(abs(projection.percentPerHour - 10) < 1e-9)
     }
 
     @Test("Four samples inside a three-minute span are still below the span minimum")
@@ -298,52 +291,13 @@ struct ProjectionTests {
                 kind: .fiveHour,
                 snapshot: snapshot(fiveHour: LimitWindow(utilization: 21, resetsAt: nil)),
                 samples: series, events: [], now: Self.now))
-        #expect(projection.basis == .estimated)
-        // No events and no reset time: nothing to project, and nothing invented.
+
+        // No reset instant, so there is no elapsed time to pace over and no horizon to project
+        // to: nothing is invented.
+        #expect(projection.basis == .flat)
         #expect(projection.percentPerHour == 0)
         #expect(projection.projectedAtReset == nil)
         #expect(projection.timeToCap == nil)
-    }
-
-    @Test("The estimated rate is zero without usable events")
-    func estimatedRateWithoutEvents() {
-        #expect(
-            ProjectionEngine.estimatedRate(
-                events: [], kind: .fiveHour, currentPercent: 30, now: Self.now) == 0)
-
-        // Spend inside the window but nothing inside the trailing window: not burning now.
-        let idle = [event("old", at: Self.now.addingTimeInterval(-2 * 3600), output: 10_000)]
-        #expect(
-            ProjectionEngine.estimatedRate(
-                events: idle, kind: .fiveHour, currentPercent: 30, now: Self.now) == 0)
-
-        // Nothing consumed yet, so there is no calibration to anchor the rate to.
-        let busy = [event("recent", at: Self.now.addingTimeInterval(-5 * 60), output: 10_000)]
-        #expect(
-            ProjectionEngine.estimatedRate(
-                events: busy, kind: .fiveHour, currentPercent: 0, now: Self.now) == 0)
-    }
-
-    @Test("`<synthetic>` rows do not contribute to the estimated rate")
-    func syntheticExcludedFromEstimate() {
-        let synthetic = [
-            event("s1", at: Self.now.addingTimeInterval(-2 * 3600), output: 500_000,
-                  model: "<synthetic>"),
-            event("s2", at: Self.now.addingTimeInterval(-10 * 60), output: 500_000,
-                  model: "<synthetic>"),
-        ]
-        #expect(
-            ProjectionEngine.estimatedRate(
-                events: synthetic, kind: .fiveHour, currentPercent: 30, now: Self.now) == 0)
-
-        let mixed =
-            synthetic + [
-                event("old", at: Self.now.addingTimeInterval(-3 * 3600), output: 10_000),
-                event("recent", at: Self.now.addingTimeInterval(-20 * 60), output: 10_000),
-            ]
-        let rate = ProjectionEngine.estimatedRate(
-            events: mixed, kind: .fiveHour, currentPercent: 20, now: Self.now)
-        #expect(abs(rate - 40.0 / 3) < 1e-6)
     }
 
     // MARK: - Cap crossing
@@ -770,5 +724,110 @@ struct ProjectionTests {
         #expect(kept.count == 2)
         #expect(kept.first?.fiveHourPct == 1)
         #expect(kept.last?.fiveHourPct == 6)
+    }
+
+    // MARK: - The 5-hour window falls back to pacing, not to local tokens
+
+    @Test("Without enough polls to fit, the 5-hour window is paced from the snapshot alone")
+    func fiveHourFallsBackToPacing() throws {
+        // The live failure: the app has just started, so the series is too short to fit, and
+        // the window's usage came from claude.ai and a second machine, so the transcripts show
+        // nothing at all. The snapshot still knows how much of the window is gone and how much
+        // of the budget went with it, and that is account-wide by construction.
+        let resetsAt = Self.now.addingTimeInterval(3 * 3600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .fiveHour,
+                snapshot: snapshot(fiveHour: LimitWindow(utilization: 20, resetsAt: resetsAt)),
+                samples: [], events: [], now: Self.now))
+
+        #expect(projection.basis == .paced)
+        // Two of the five hours are gone and a fifth of the budget with them: 10 points/hour.
+        #expect(abs(projection.percentPerHour - 10) < 1e-9)
+        #expect(abs(try #require(projection.projectedAtReset) - 50) < 1e-9)
+    }
+
+    @Test("A measured fit still beats pacing on the 5-hour window")
+    func fiveHourPrefersTheFitWhenItHasOne() throws {
+        let resetsAt = Self.now.addingTimeInterval(3 * 3600)
+        let series = samples(count: 9) { 10 + 10 * (Double($0) * 5 / 60) }
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .fiveHour,
+                snapshot: snapshot(fiveHour: LimitWindow(utilization: 50, resetsAt: resetsAt)),
+                samples: series, events: [], now: Self.now))
+
+        #expect(projection.basis == .measured)
+        #expect(abs(projection.percentPerHour - 10) < 0.01)
+    }
+
+    @Test("The minimum a window must have been open to be paced scales with its own length")
+    func minimumElapsedScalesWithTheWindow() {
+        // A flat hour is 0.6% of a week and 20% of a five-hour window. A fraction of the
+        // window's own length is one rule; a flat hour was two.
+        #expect(abs(ProjectionEngine.minimumElapsedHours(for: .fiveHour) - 0.25) < 1e-9)
+        #expect(abs(ProjectionEngine.minimumElapsedHours(for: .sevenDay) - 8.4) < 1e-9)
+    }
+
+    @Test("A 5-hour window minutes old is not paced from a single quantization step")
+    func fiveHourTooYoungToPace() throws {
+        // Ten minutes in with one point showing paces at 6 points/hour, which reaches 100%
+        // inside the window and fires the cap warning off a rounding step.
+        let resetsAt = Self.now.addingTimeInterval(5 * 3600 - 600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .fiveHour,
+                snapshot: snapshot(fiveHour: LimitWindow(utilization: 1, resetsAt: resetsAt)),
+                samples: [], events: [], now: Self.now))
+
+        #expect(projection.basis == .flat)
+        #expect(projection.percentPerHour == 0)
+        #expect(abs(try #require(projection.projectedAtReset) - 1) < 1e-9)
+        #expect(projection.timeToCap == nil)
+    }
+
+    @Test("A paced 5-hour window carries an interval")
+    func pacedFiveHourHasAnInterval() throws {
+        let resetsAt = Self.now.addingTimeInterval(3 * 3600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .fiveHour,
+                snapshot: snapshot(fiveHour: LimitWindow(utilization: 20, resetsAt: resetsAt)),
+                samples: [], events: lumpyDay(), now: Self.now))
+
+        #expect(projection.basis == .paced)
+        #expect(try #require(projection.projectedBand) > 0)
+    }
+
+    // MARK: - Hourly variation
+
+    /// Two days of hours, most empty and one enormous — the hour-scale analogue of
+    /// `lumpyFortnight`, and the shape a real account has.
+    private func lumpyDay(now: Date = ProjectionTests.now) -> [UsageEvent] {
+        (1...40).compactMap { offset in
+            let output = offset == 1 ? 4_000_000 : (offset % 5 == 0 ? 120_000 : 0)
+            guard output > 0 else { return nil }
+            return event(
+                "hour-\(offset)", at: now.addingTimeInterval(-Double(offset) * 3600 - 60),
+                output: output)
+        }
+    }
+
+    @Test("Hourly variation needs a minimum of complete hours before it says anything")
+    func hourlyVariationNeedsHistory() {
+        #expect(ProjectionEngine.hourlyVariation(events: [], now: Self.now) == nil)
+
+        let oneHour = [event("solo", at: Self.now.addingTimeInterval(-3_660), output: 100_000)]
+        #expect(ProjectionEngine.hourlyVariation(events: oneHour, now: Self.now) == nil)
+    }
+
+    @Test("Hourly variation is a clamped coefficient over the trailing complete hours")
+    func hourlyVariationIsClamped() throws {
+        let variation = try #require(
+            ProjectionEngine.hourlyVariation(events: lumpyDay(), now: Self.now))
+
+        #expect(variation.hours >= ProjectionEngine.minimumVariationHours)
+        #expect(variation.coefficient <= ProjectionEngine.variationCeiling)
+        #expect(variation.coefficient >= ProjectionEngine.variationFloor)
     }
 }

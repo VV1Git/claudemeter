@@ -334,7 +334,7 @@ import UsageCore
     /// Records one poll observation. `SampleStore.append` inserts into its own series only after
     /// the file write lands, so taking `store.samples` unconditionally would drop the point from
     /// the series the burn rate is fitted to whenever the write failed — and an unwritable
-    /// support directory would then pin every projection at `.estimated` for the life of the
+    /// support directory would then pin every 5-hour projection at `.paced` for the life of the
     /// process. Persistence is allowed to degrade; the fit is not. A later successful append
     /// hands authority back to the store, which costs the points written only in memory — one
     /// point of a 45-minute trailing fit, against a whole series otherwise.

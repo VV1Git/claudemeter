@@ -515,14 +515,18 @@ public enum MenuBarFormat: String, Codable, Sendable, CaseIterable {
 public enum ProjectionBasis: String, Sendable {
     /// Fitted from the persisted poll series — the trustworthy path.
     case measured
-    /// Derived from transcript token velocity calibrated against the current
-    /// utilization, used before enough samples have accumulated.
-    case estimated
     /// The window's own consumption divided by how long it has been open, carried
     /// forward at that average. Used for the fixed weekly window, whose horizon is
-    /// far too long to extrapolate a regression across. Needs no poll history, so it
-    /// is available from the first reading.
+    /// far too long to extrapolate a regression across, and for a 5-hour window with
+    /// too few polls to fit. Needs no poll history, so it is available from the first
+    /// reading — and it is drawn from the API's own utilization, so it counts usage
+    /// from every device and surface on the account rather than from this machine's
+    /// transcripts.
     case paced
+    /// No rate could be established at all: too few polls to fit and a window too
+    /// young to pace. Reports the current reading carried forward unchanged, which is
+    /// a statement rather than a guess.
+    case flat
 }
 
 public struct Projection: Sendable, Equatable {
