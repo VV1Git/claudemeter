@@ -41,9 +41,9 @@ Clicking the item opens a window (not an `NSMenu`, because Swift Charts and disc
 not render inside one). It is one column while the sections are closed and two once the daily
 breakdown is open, since that section alone is taller than a single column can show. Top to bottom:
 
-- A notice when something is wrong: not signed in, token expired, or offline with the reason, when
-  the next request is due, and a reminder that the transcript-derived statistics below are
-  unaffected.
+- A notice when something is wrong: not signed in, credentials beyond renewal, or offline with the
+  reason, when the next request is due, and a reminder that the transcript-derived statistics below
+  are unaffected.
 - Two meters, one per window, each with the percentage, a capsule bar, a reset line that switches
   from a countdown to a weekday-and-time once the reset is twelve hours or more out, a pace line
   (`↗ 12 pts/hr · 63% at reset ± 4`), and a warning line when the window is on pace to hit 100%
@@ -185,34 +185,53 @@ cache rates are derived from the input rate (1.25× for a 5-minute cache write, 
 
 ## The credential model
 
-Access is read-only, and that is a design commitment, not an omission. `Keychain` performs one
-`SecItemCopyMatching` against the generic-password item for service `Claude Code-credentials`, parses
-`claudeAiOauth.accessToken` and `expiresAt` (epoch milliseconds), and discards the refresh token —
-the type it returns has no field to put one in. Nothing in the app writes, updates or deletes the
-item.
+`Keychain` reads the generic-password item for service `Claude Code-credentials` and parses
+`claudeAiOauth`: the access token and its `expiresAt` (epoch milliseconds), plus the refresh token,
+that token's own deadline, the granted scopes, and the OAuth client the pair was issued to. The
+Keychain is re-read on **every** poll rather than cached, so a token Claude Code has just rotated is
+picked up without a relaunch.
 
-The reason is that the item is shared with Claude Code. Refreshing a token means writing the new one
-back into that item, so two processes refreshing on their own schedules race for it: whichever writes
-last wins, and a write from here could clobber a token the CLI had just rotated. Claude Code is the
-process that has to keep working, and losing its login is a sign-out this app has no way to repair,
-so it does not compete for the write. What the server's exact token-rotation semantics are is not
-something this code establishes; what it commits to is never writing. Instead:
+An access token lasts hours, so an app that only ever reads one spends a good part of its life
+looking at an expired credential. ClaudeMeter renews instead. `TokenRefresher` posts the refresh
+token to `platform.claude.com/v1/oauth/token` with Claude Code's own client identifier and the
+scopes already held — the same exchange the CLI performs when its token ages out, read out of the
+shipped binary rather than guessed, so a token either process renews is one the other accepts. It
+runs when the stored token is within five minutes of its deadline, which is wider than the slowest
+poll interval: every poll therefore starts on a token that will still be valid when its request
+lands, and the app never discovers expiry by being refused.
 
-- The Keychain is re-read on **every** poll rather than cached, so a token Claude Code has just
-  rotated is picked up without a relaunch.
-- An already-expired token means no request is made at all. There is nothing to gain from a
-  guaranteed 401, and the fix is Claude Code writing a new token, which should show up within a
-  minute. The panel says `Token expired` and tells you to run any Claude Code command. Expiry is
-  inclusive: a token whose deadline is exactly now is treated as unusable, because the request would
-  land after it.
-- A 401 or 403 from a request that *was* made triggers one re-read before it is reported, since the
-  token may have rotated mid-request. `LimitsClient` maps both statuses to the same unauthorized
-  case, so both take that path. If the item has disappeared entirely in the meantime, the app says
-  "not signed in" rather than "renew", because those need different actions from you.
+The item is shared with Claude Code, so the write back is the narrow part of the design:
+
+- **It is a merge, not a replacement.** The payload is re-read, four fields are overwritten in
+  place, and every other key — at the top level and inside `claudeAiOauth` — survives untouched,
+  including ones this app has never heard of.
+- **It is conditional.** The write only lands if the stored refresh token is still the one this
+  refresh was made with. If Claude Code refreshed first, its pair is the newer one and ours is
+  discarded — the first writer wins, not the last. That is the same compare-and-swap the CLI
+  applies to its own credential writes, which is what keeps two processes off each other's tokens.
+- **It is retried.** A Keychain write can fail transiently; a lost write would leave the CLI holding
+  a refresh token the server may have rotated away, so it is worth more than one attempt.
+- **A refresh is only ever spent close to expiry**, when the CLI was about to make the same trade
+  anyway. That is the mitigation for the one failure this code cannot repair: a refresh that
+  succeeds server-side and then cannot be persisted.
+
+What cannot be renewed is reported rather than retried. No refresh token (the shape
+`claude setup-token` writes), a refresh token past its own deadline, or a grant the server refuses
+outright are all permanent, and the panel says `Sign in again`. A network failure or a 5xx is not
+permanent: if the access token still has life in it the poll goes ahead on it, and the renewal is
+tried again next time.
+
+A 401 or 403 from a request that *was* made triggers one re-read before it is reported, since the
+token may have rotated mid-request. `LimitsClient` maps both statuses to the same unauthorized case,
+so both take that path. If the stored token has changed, the retry uses it; otherwise a renewal is
+forced — a token the server rejects is spent whatever its stored deadline claims — and the request
+is made once more. A second 401 on a token minted seconds earlier is not something another renewal
+fixes, so it stops there. If the item has disappeared entirely in the meantime, the app says "not
+signed in" rather than "sign in again", because those need different actions from you.
 
 Credential states are handled separately from transport failures. No request was made, so there is
 nothing to back off from: the cached snapshot stays on screen, the normal cadence continues, and a
-panel-open refresh is still allowed, which is how a freshly rotated token is picked up immediately.
+panel-open refresh is still allowed.
 
 ## Privacy
 

@@ -395,7 +395,7 @@ The panel shows a notice at the top and adjusts what it trusts. There are four s
 | --- | --- | --- |
 | Live | none | Last poll succeeded. |
 | Offline | `Offline since 3:20 PM` (or `Can't reach the usage API`) | The last poll failed. The reason and the time of the next attempt are in the notice. |
-| Token expired | `Token expired` | Credentials are present but past their expiry. |
+| Sign in again | `Sign in again` | Credentials are present but beyond renewal — the refresh token has expired, been revoked, or was never there. |
 | Not signed in | `Not signed in` | No usable Claude Code credentials in the Keychain. |
 
 While offline:
@@ -421,7 +421,8 @@ While offline:
 The credential states are handled differently from a transport failure, because no request was made.
 There is nothing to back off from, so the app keeps its normal cadence and stays open to a
 panel-open refresh — which is how a token Claude Code has just rotated gets picked up immediately.
-An expired token is a certain rejection, so the app does not spend a request on it.
+A token near its deadline is renewed before the request rather than after a rejection, so expiry on
+its own is not a state you see.
 
 ## The refresh cadence, and what setting it actually does
 
@@ -468,11 +469,13 @@ almost nothing.
 system can treat a freshly built copy as a different application and ask again. Signing with a
 stable self-signed certificate avoids the repeat if it becomes tiresome.
 
-**`Token expired`.** ClaudeMeter reads Claude Code's token and never refreshes it — refresh tokens
-rotate, and racing the CLI's own refresh risks signing you out. There is nothing to fix in the app.
-Run any Claude Code command; the CLI writes a new token, and ClaudeMeter re-reads the Keychain on
-every poll, so the notice clears within a cadence. Opening the panel picks it up sooner, since
-credential states leave the app open to a panel-open refresh.
+**`Sign in again`.** ClaudeMeter renews Claude Code's access token on its own, using the stored
+refresh token, whenever the one it finds is within five minutes of expiring — so an expired access
+token is not something you should ever have to act on. This notice means the *refresh* token is the
+problem: it has passed its own deadline (they last a few weeks), the server has revoked it, or the
+credentials never had one, which is the shape `claude setup-token` writes. None of those can be
+fixed from this side. Run `claude` and sign in; ClaudeMeter re-reads the Keychain on every poll, so
+the notice clears within a cadence, and opening the panel picks it up sooner.
 
 **`Not signed in`.** No usable credential item exists. Sign in to Claude Code; the app picks the
 credentials up on its next poll.

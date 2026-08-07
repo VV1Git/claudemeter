@@ -76,6 +76,15 @@ import UsageCore
     /// the limit. (Not additive-increase/multiplicative-decrease, despite the shape of the idea.)
     private static let speedupFactor: Double = 0.8
 
+    /// How much life a token must have left to be used as-is. Wider than the slowest poll
+    /// interval, so every poll finds a token that will still be valid when its request lands
+    /// — the app never has to discover expiry by being refused. Wider still would mean
+    /// refreshing sooner than Claude Code does and rotating tokens out from under it.
+    private static let refreshLeadTime: TimeInterval = 5 * 60
+    /// Attempts at writing a refreshed pair back to the shared Keychain item.
+    private static let credentialWriteAttempts = 3
+    private static let credentialWriteRetryDelay: TimeInterval = 0.1
+
     private static let maximumBackoff: TimeInterval = 300
     /// A `Retry-After` is honoured as sent, but not unboundedly: a header that asks for a day
     /// would otherwise park the app until it is relaunched.
@@ -94,6 +103,7 @@ import UsageCore
     // MARK: Collaborators
 
     private let client = LimitsClient()
+    private let refresher = TokenRefresher()
     private let store = SampleStore()
 
     /// Deduplicated transcript events, replaced wholesale by each completed scan. Held on the
@@ -395,20 +405,30 @@ import UsageCore
     private func pollOnce(now: Date) async -> TimeInterval {
         // Re-read every poll rather than caching the token: Claude Code refreshes it on its own
         // schedule, and this app must pick that up without being relaunched.
-        let credentials: ClaudeCredentials
+        let stored: ClaudeCredentials
         do {
-            credentials = try Keychain.readCredentials()
+            stored = try Keychain.readCredentials()
         } catch KeychainError.notFound {
             return settle(.noCredentials)
         } catch {
             return fail(reason: message(for: error), now: now)
         }
 
-        // An expired token is a certain 401, and the app deliberately does not refresh it, so
-        // there is no request worth making — but keep the normal cadence, since the fix is
-        // Claude Code writing a new token and that should show up within a minute.
-        guard !credentials.isExpired(asOf: now) else {
+        // Renew before the request rather than after a 401: the point is that a token close to
+        // its deadline never gets used, so the app is not periodically down for the minutes
+        // between expiry and whenever Claude Code next runs.
+        let credentials: ClaudeCredentials
+        switch await freshened(stored, now: now) {
+        case .usable(let renewed):
+            credentials = renewed
+        case .signInRequired:
             return settle(.staleCredentials)
+        case .unavailable(let reason):
+            // The refresh failed for a reason that may not last — no network, a 500. If the
+            // token still has life in it the request is worth making anyway; if it does not,
+            // there is nothing to make it with, so back off and try the refresh again.
+            guard !stored.isExpired(asOf: now) else { return fail(reason: reason, now: now) }
+            credentials = stored
         }
 
         do {
@@ -423,8 +443,23 @@ import UsageCore
                 // have rotated mid-request.
                 do {
                     let latest = try Keychain.readCredentials()
-                    if latest.isExpired(asOf: Date()) { return settle(.staleCredentials) }
-                    return fail(reason: error.description, now: now)
+                    // A token the server rejects is spent whatever its stored deadline claims,
+                    // so force a renewal rather than gating on `isExpired` — the deadline can
+                    // be wrong, and the 401 is the authority on that.
+                    if latest.accessToken != credentials.accessToken {
+                        // Rotated mid-request, by Claude Code or by another instance of this
+                        // app. The stored token is newer than the one that was refused, so
+                        // spend the retry on it rather than a refresh.
+                        return await retryAfterRenewal(with: latest, now: now)
+                    }
+                    switch await renew(latest, now: Date()) {
+                    case .usable(let renewed):
+                        return await retryAfterRenewal(with: renewed, now: now)
+                    case .signInRequired:
+                        return settle(.staleCredentials)
+                    case .unavailable:
+                        return fail(reason: error.description, now: now)
+                    }
                 } catch KeychainError.notFound {
                     // Signed out between the request and now — not an expired token, and the
                     // instruction the user needs is "sign in", not "renew".
@@ -449,6 +484,124 @@ import UsageCore
                 nextAttemptNotBefore = now.addingTimeInterval(delay)
                 return delay
 
+            case .httpStatus, .transport, .decoding:
+                return fail(reason: error.description, now: now)
+            }
+        } catch {
+            return fail(reason: message(for: error), now: now)
+        }
+    }
+
+    // MARK: - Token renewal
+
+    /// What a renewal attempt left the app holding.
+    private enum CredentialRenewal {
+        /// Good for a request now — either freshly minted, or the stored pair when it had
+        /// enough life left to leave alone.
+        case usable(ClaudeCredentials)
+        /// The refresh token is gone, expired, or refused. Only a new sign-in helps.
+        case signInRequired
+        /// The refresh could not be completed for a reason that may not last.
+        case unavailable(String)
+    }
+
+    /// Renews only when the token is at or near its deadline; otherwise hands back what was
+    /// stored. A refresh token is not free to spend — each one may be rotated away — so this
+    /// is deliberately not "refresh every poll".
+    private func freshened(
+        _ credentials: ClaudeCredentials, now: Date
+    ) async -> CredentialRenewal {
+        guard credentials.expiresSoon(asOf: now, lead: Self.refreshLeadTime) else {
+            return .usable(credentials)
+        }
+        return await renew(credentials, now: now)
+    }
+
+    /// Trades the refresh token for a new pair and writes it back to the shared Keychain item.
+    ///
+    /// The write is conditional on the stored refresh token still being the one spent here. If
+    /// Claude Code refreshed first, its pair is the live one and this refresh is dropped — the
+    /// last writer does not win, the first one does, which is what keeps two processes off each
+    /// other's tokens.
+    private func renew(_ credentials: ClaudeCredentials, now: Date) async -> CredentialRenewal {
+        guard let spent = credentials.usableRefreshToken(asOf: now) else { return .signInRequired }
+
+        let tokens: RefreshedTokens
+        do {
+            tokens = try await refresher.refresh(credentials, now: now)
+        } catch let error as TokenRefreshError {
+            return error.requiresSignIn ? .signInRequired : .unavailable(error.description)
+        } catch {
+            return .unavailable(message(for: error))
+        }
+
+        let renewed = credentials.applying(tokens)
+        do {
+            if try storeWithRetries(tokens, replacing: spent) {
+                return .usable(renewed)
+            }
+            // Lost the race. Whatever is stored now was written by a process that refreshed
+            // more recently, so it is the pair to use.
+            return .usable(try Keychain.readCredentials())
+        } catch KeychainError.notFound {
+            return .signInRequired
+        } catch {
+            // Refreshed but could not persist. The new token still works for this app's own
+            // requests, so it is used rather than thrown away — but Claude Code will not see
+            // it, and if the server rotated the refresh token the CLI's stored copy is now
+            // the stale one. Nothing here can undo that, which is why a refresh is only ever
+            // spent close to expiry, when the CLI was about to make the same trade anyway.
+            return .usable(renewed)
+        }
+    }
+
+    /// The Keychain can refuse a write transiently — another process holding the item, a
+    /// prompt being dismissed. Claude Code retries its own credential writes for the same
+    /// reason; a lost write here means the CLI keeps a refresh token the server may have
+    /// rotated away, so it is worth more than one attempt.
+    private func storeWithRetries(
+        _ tokens: RefreshedTokens, replacing spent: String
+    ) throws -> Bool {
+        var lastError: Error?
+        for attempt in 0..<Self.credentialWriteAttempts {
+            do {
+                return try Keychain.storeRefreshedTokens(tokens, replacing: spent)
+            } catch KeychainError.notFound {
+                throw KeychainError.notFound
+            } catch {
+                lastError = error
+                if attempt + 1 < Self.credentialWriteAttempts {
+                    // Short and blocking on purpose: this runs between a successful refresh
+                    // and the poll that uses it, and the whole point is to land the write.
+                    Thread.sleep(forTimeInterval: Self.credentialWriteRetryDelay)
+                }
+            }
+        }
+        throw lastError ?? KeychainError.unhandled(errSecIO)
+    }
+
+    /// One more read of the usage endpoint after a renewal, so a poll that started on a token
+    /// the server had already retired still returns fresh numbers instead of an outage.
+    private func retryAfterRenewal(
+        with credentials: ClaudeCredentials, now: Date
+    ) async -> TimeInterval {
+        do {
+            let fresh = try await client.fetch(accessToken: credentials.accessToken, now: now)
+            apply(fresh, now: now)
+            noteCleanPoll()
+            return pollInterval
+        } catch let error as LimitsClientError {
+            switch error {
+            case .unauthorized:
+                // A token minted seconds ago and refused anyway. Another renewal would be
+                // refused too, so stop and ask for a sign-in rather than loop.
+                return settle(.staleCredentials)
+            case .rateLimited:
+                slowDown()
+                let backoff = fail(reason: error.description, now: now)
+                let delay = max(backoff, pollInterval)
+                nextAttemptNotBefore = now.addingTimeInterval(delay)
+                return delay
             case .httpStatus, .transport, .decoding:
                 return fail(reason: error.description, now: now)
             }

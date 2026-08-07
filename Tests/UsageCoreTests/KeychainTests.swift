@@ -13,6 +13,7 @@ private let credentialShapeJSON = """
     "accessToken": "sk-ant-oat01-EXAMPLE",
     "refreshToken": "sk-ant-ort01-EXAMPLE",
     "expiresAt": 1700000000000,
+    "refreshTokenExpiresAt": 1701728000000,
     "scopes": ["user:inference", "user:profile"],
     "subscriptionType": "example_plan",
     "rateLimitTier": "example_tier"
@@ -149,5 +150,92 @@ struct KeychainTests {
         let first = try parse(credentialShapeJSON)
         let second = try parse(credentialShapeJSON)
         #expect(first == second)
+    }
+
+    // MARK: Renewal fields
+
+    @Test("The refresh token and its own deadline are read")
+    func parsesRenewalFields() throws {
+        let credentials = try parse(credentialShapeJSON)
+        #expect(credentials.refreshToken == "sk-ant-ort01-EXAMPLE")
+        #expect(
+            credentials.refreshTokenExpiresAt == Date(timeIntervalSince1970: 1_701_728_000))
+        #expect(credentials.scopes == ["user:inference", "user:profile"])
+    }
+
+    @Test("A credential with no refresh token cannot be renewed")
+    func absentRefreshToken() throws {
+        let json = #"{"claudeAiOauth": {"accessToken": "t", "expiresAt": 1700000000000}}"#
+        let credentials = try parse(json)
+        #expect(credentials.refreshToken == nil)
+        #expect(credentials.usableRefreshToken(asOf: Date()) == nil)
+        #expect(credentials.scopes.isEmpty)
+    }
+
+    @Test("An empty refresh token counts as none, not as a token worth spending")
+    func emptyRefreshToken() throws {
+        let json = """
+        {"claudeAiOauth": {"accessToken": "t", "refreshToken": "", "expiresAt": 1700000000000}}
+        """
+        let credentials = try parse(json)
+        #expect(credentials.refreshToken == nil)
+        #expect(credentials.usableRefreshToken(asOf: Date()) == nil)
+    }
+
+    @Test("A refresh token past its own deadline is not usable")
+    func expiredRefreshToken() throws {
+        let credentials = try parse(credentialShapeJSON)
+        let deadline = try #require(credentials.refreshTokenExpiresAt)
+        #expect(credentials.usableRefreshToken(asOf: deadline.addingTimeInterval(-1)) != nil)
+        #expect(credentials.usableRefreshToken(asOf: deadline) == nil)
+        #expect(credentials.usableRefreshToken(asOf: deadline.addingTimeInterval(1)) == nil)
+    }
+
+    @Test("A refresh token with no stated deadline is usable")
+    func refreshTokenWithoutDeadline() throws {
+        let json = """
+        {"claudeAiOauth": {"accessToken": "t", "refreshToken": "r", "expiresAt": 1700000000000}}
+        """
+        let credentials = try parse(json)
+        #expect(credentials.usableRefreshToken(asOf: Date.distantFuture) == "r")
+    }
+
+    @Test("The renewal window opens before expiry, not at it")
+    func expiresSoonLeadsExpiry() throws {
+        let credentials = try parse(credentialShapeJSON)
+        let expiry = credentials.expiresAt
+        #expect(credentials.expiresSoon(asOf: expiry.addingTimeInterval(-60), lead: 300))
+        #expect(credentials.expiresSoon(asOf: expiry.addingTimeInterval(-300), lead: 300))
+        #expect(credentials.expiresSoon(asOf: expiry.addingTimeInterval(-301), lead: 300) == false)
+        // Already past its deadline is still "soon" — there is nothing later than expired.
+        #expect(credentials.expiresSoon(asOf: expiry.addingTimeInterval(3600), lead: 300))
+    }
+
+    @Test("The client identifier is read when present, and absent otherwise")
+    func clientIdentifier() throws {
+        #expect(try parse(credentialShapeJSON).clientID == nil)
+        let json = """
+        {"claudeAiOauth": {"accessToken": "t", "expiresAt": 1700000000000, "clientId": "abc"}}
+        """
+        #expect(try parse(json).clientID == "abc")
+    }
+
+    @Test("A renewal field that changes type costs only that field")
+    func renewalFieldTypeChange() throws {
+        // The access token is what the app needs; `scopes` arriving as a string, or a
+        // numeric `subscriptionType`, must not take the whole item down with it.
+        let json = """
+        {
+          "claudeAiOauth": {
+            "accessToken": "t", "expiresAt": 1700000000000,
+            "scopes": "user:inference", "subscriptionType": 7, "refreshToken": 42
+          }
+        }
+        """
+        let credentials = try parse(json)
+        #expect(credentials.accessToken == "t")
+        #expect(credentials.scopes.isEmpty)
+        #expect(credentials.subscriptionType == nil)
+        #expect(credentials.refreshToken == nil)
     }
 }

@@ -605,7 +605,8 @@ public enum DataHealth: Sendable, Equatable {
     case live
     /// Serving a cached snapshot; the last poll failed.
     case offline(since: Date, reason: String)
-    /// Credentials are present but expired, and no refreshed token has appeared.
+    /// Credentials are present but beyond renewal — no refresh token, one that has expired
+    /// in its own right, or one the server refused. Only a new sign-in clears this.
     case staleCredentials
     /// No usable credentials found in the Keychain at all.
     case noCredentials

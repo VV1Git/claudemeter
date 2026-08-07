@@ -928,9 +928,9 @@ struct PanelView: View {
         case .staleCredentials:
             return notice(
                 symbol: "exclamationmark.triangle",
-                title: "Token expired",
-                detail: "ClaudeMeter reads Claude Code's token but never refreshes it. Run any "
-                    + "Claude Code command to renew it.",
+                title: "Sign in again",
+                detail: "ClaudeMeter renews Claude Code's token on its own, but this one can no "
+                    + "longer be renewed. Run `claude` and sign in to restore it.",
                 tint: SeverityStyle.color(.warning))
         case let .offline(since, reason):
             // "Rate limited" on its own reads as stuck. What the reader needs is when it will
