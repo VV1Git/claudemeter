@@ -171,8 +171,14 @@ public enum ProjectionEngine {
     ///
     /// Samples missing a percentage for `kind` are dropped rather than treated as zero —
     /// the API returns `null` windows routinely and a zero would read as a reset.
-    public static func usableSamples(_ samples: [Sample], kind: WindowKind, now: Date) -> [Sample] {
-        let cutoff = now.addingTimeInterval(-trailingWindow)
+    ///
+    /// `window` defaults to the regression's trailing span. `ActivitySignal` asks for a longer one
+    /// — it is differencing whole percentage points rather than fitting a line through them, and
+    /// needs a stretch the window can have moved measurably across.
+    public static func usableSamples(
+        _ samples: [Sample], kind: WindowKind, now: Date, window: TimeInterval = trailingWindow
+    ) -> [Sample] {
+        let cutoff = now.addingTimeInterval(-window)
         let series = samples
             .filter { $0.t <= now && $0.t >= cutoff && $0.percent(for: kind) != nil }
             .sorted { $0.t < $1.t }
@@ -343,34 +349,26 @@ public enum ProjectionEngine {
     public static func dailyVariation(
         events: [UsageEvent], now: Date, calendar: Calendar = .current
     ) -> (coefficient: Double, days: Int)? {
-        let today = calendar.startOfDay(for: now)
-        guard let earliest = calendar.date(byAdding: .day, value: -variationDays, to: today)
+        // Bucketed through `LocalDayIndex` rather than by `startOfDay` per event, for the reason
+        // that type documents: this runs on the main actor on every poll, and a calendar call per
+        // event over a fortnight of a large corpus is tens of milliseconds of it.
+        guard let index = LocalDayIndex(days: variationDays, endingAt: now, calendar: calendar)
         else { return nil }
-
-        var totals: [Date: Double] = [:]
-        for event in events where event.model != syntheticModel {
-            guard event.timestamp >= earliest, event.timestamp < today else { continue }
-            totals[calendar.startOfDay(for: event.timestamp), default: 0] += weight(event.tokens)
-        }
 
         // Zero-filled: a day with no work is a real observation about how this account is
         // used, and dropping it would report the variability of only the busy days.
-        var series: [Double] = []
-        for offset in 1...variationDays {
-            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
-            series.append(totals[calendar.startOfDay(for: day)] ?? 0)
+        var totals = [Double](repeating: 0, count: index.dayCount)
+        var firstUsed: Int?
+        for event in events where event.model != syntheticModel {
+            guard let day = index.day(of: event.timestamp) else { continue }
+            totals[day] += weight(event.tokens)
+            if firstUsed == nil || day < firstUsed! { firstUsed = day }
         }
-        guard series.count >= minimumVariationDays else { return nil }
-        guard let firstUsed = totals.keys.min() else { return nil }
 
         // Days before the transcripts begin are absence of evidence, not idle days, so the
         // series is cut at the earliest day with any recorded work.
-        let observed = series.enumerated().compactMap { offset, value -> Double? in
-            guard let day = calendar.date(byAdding: .day, value: -(offset + 1), to: today),
-                calendar.startOfDay(for: day) >= calendar.startOfDay(for: firstUsed)
-            else { return nil }
-            return value
-        }
+        guard let firstUsed else { return nil }
+        let observed = Array(totals[firstUsed...])
         guard observed.count >= minimumVariationDays else { return nil }
 
         let count = Double(observed.count)
@@ -460,7 +458,8 @@ public enum ProjectionEngine {
     /// 5-hour window's reset time drifts forward between polls.
     public static func project(
         kind: WindowKind, snapshot: UsageSnapshot, samples: [Sample],
-        events: [UsageEvent], now: Date
+        events: [UsageEvent], now: Date,
+        idleGap: TimeInterval = Aggregates.defaultActiveGap, calendar: Calendar = .current
     ) -> Projection? {
         guard let window = (kind == .fiveHour ? snapshot.fiveHour : snapshot.sevenDay) else {
             return nil
@@ -479,7 +478,7 @@ public enum ProjectionEngine {
         if let resetsAt,
             let paced = pacedProjection(
                 kind: kind, currentPercent: currentPercent, resetsAt: resetsAt,
-                events: events, now: now)
+                samples: samples, events: events, now: now, idleGap: idleGap, calendar: calendar)
         {
             return paced
         }
@@ -548,8 +547,20 @@ public enum ProjectionEngine {
         )
     }
 
+    /// How far the activity profile is allowed to move the measured pace, as a factor either way.
+    ///
+    /// The pace is `consumed ÷ elapsed activity`, so a profile that thinks the window opened into
+    /// hours it expects nothing from divides by nearly nothing. That case is real — a week that
+    /// turns over at 04:00 spends its first six hours in the profile's basement — and unbounded:
+    /// the floor on an hour is a twentieth, so eight such hours would multiply the pace by twenty
+    /// on the strength of four weeks of one machine's transcripts. Four is the most leverage that
+    /// evidence supports; past it the shaped rate is clamped and the shape still applies to the
+    /// horizon ahead, where it is doing the work it was built for.
+    public static let massLeverage: Double = 4
+
     /// The snapshot path: the window's own accumulated total over how long it has been
-    /// open, carried forward at that average.
+    /// open, carried forward at that average — with "how long" measured on the account's own
+    /// activity clock rather than on the wall clock.
     ///
     /// This needs no poll history at all — the snapshot already says how much of the window is
     /// gone and how much of the budget went with it — which is why it is right from the first
@@ -557,14 +568,30 @@ public enum ProjectionEngine {
     /// absurd. On a real mid-week snapshot the two disagree by a factor of four: pacing 39%,
     /// regression 171%, on a week that was 22% used with three days left.
     ///
+    /// What it used to get wrong is *which hours it was pacing across*. Dividing by elapsed wall
+    /// clock and multiplying by remaining wall clock prices 04:00 on a Sunday exactly like 15:00
+    /// on a Tuesday, which no account with a sleep cycle does. `ActivityProfile` supplies the
+    /// shape — hour of day times day of week, shrunk toward flat by how many days it was measured
+    /// over — and `ActivitySignal` supplies what is happening right now: whether this machine is
+    /// mid-burst, how many sub-agents are running in it, how long it has already been running,
+    /// and whether the limit itself is climbing faster than the window's own pace expects. The
+    /// live term decays back to the profile over a couple of hours, because a burst says a great
+    /// deal about the next hour and nearly nothing about the day after tomorrow.
+    ///
+    /// Under `.uniform` — a new install, or an account with under three complete days of
+    /// transcripts — every mass below is exactly a count of wall-clock hours and this reduces,
+    /// line for line, to the flat pacing it replaces.
+    ///
     /// The interval comes from how much this account's daily usage actually varies, which is
     /// the dominant unknown over a horizon measured in days. Summing `d` further days each
     /// drawn from a distribution estimated over `n` of them gives `Var = σ²·(d + d²/n)`: the
     /// first term is the scatter of the days themselves, the second the error in the mean
-    /// being carried across all of them.
+    /// being carried across all of them. `d` is counted in mean *days of activity* rather than in
+    /// days of clock, so a horizon that is mostly night carries proportionally less of both.
     private static func pacedProjection(
         kind: WindowKind, currentPercent: Double, resetsAt: Date,
-        events: [UsageEvent], now: Date
+        samples: [Sample], events: [UsageEvent], now: Date,
+        idleGap: TimeInterval, calendar: Calendar
     ) -> Projection? {
         let windowStart = resetsAt.addingTimeInterval(-kind.nominalDuration)
         let elapsedHours = now.timeIntervalSince(windowStart) / 3600
@@ -575,9 +602,39 @@ public enum ProjectionEngine {
         }
 
         let remainingHours = max(0, resetsAt.timeIntervalSince(now) / 3600)
-        let ratePerHour = max(0, currentPercent) / elapsedHours
-        let projectedAtReset: Double? = clampedProjection(
-            currentPercent + ratePerHour * remainingHours)
+        let profile = ActivityProfile.build(events: events, now: now, calendar: calendar)
+
+        // The activity the window has already been open across, clamped to within `massLeverage`
+        // of the clock. Both ends of the clamp matter: a week that opened at 04:00 would otherwise
+        // divide by nearly nothing, and one that opened into a fortnight's busiest evening would
+        // divide by too much.
+        let rawElapsedMass = profile.mass(from: windowStart, to: now, calendar: calendar)
+        let elapsedMass = min(
+            max(rawElapsedMass, elapsedHours / massLeverage), elapsedHours * massLeverage)
+        guard elapsedMass > 0 else { return nil }
+
+        // Points per mean hour of activity. Identical to the old points-per-hour under a flat
+        // profile, and the unit everything downstream is denominated in.
+        let ratePerMass = max(0, currentPercent) / elapsedMass
+
+        let signal = ActivitySignal.measure(
+            events: events, samples: samples, kind: kind, profile: profile,
+            ratePerMass: ratePerMass, now: now, idleGap: idleGap, calendar: calendar)
+        let multiplier = signal?.multiplier ?? 1
+        let persistence = signal?.persistence ?? 0
+
+        let remainingMass = profile.boostedMass(
+            from: now, to: resetsAt, multiplier: multiplier, persistence: persistence,
+            calendar: calendar)
+        let gain = ratePerMass * remainingMass
+        let projectedAtReset: Double? = clampedProjection(currentPercent + gain)
+
+        // The rate the row quotes is the one the forecast was actually made at: the average over
+        // the horizon ahead, not the average over the hours behind. Under a flat profile with no
+        // live signal the two are the same number; under a shaped one they are not, and quoting
+        // the historical figure beside a forecast built from a different one would leave the two
+        // unable to be reconciled by anybody reading the row.
+        let percentPerHour = remainingHours > 0 ? gain / remainingHours : ratePerMass
 
         var band: Double?
         if remainingHours > 0 {
@@ -591,14 +648,32 @@ public enum ProjectionEngine {
             // fewest units it will ever accept. Falling through with no band at all was the
             // worse failure: it printed a bare paced number.
             let unitHours = variationUnitHours(for: kind)
-            let variation = measuredVariation(kind: kind, events: events, now: now)
+            let variation = measuredVariation(
+                kind: kind, events: events, now: now, calendar: calendar)
                 ?? (coefficient: variationCeiling, count: minimumVariationCount(for: kind))
-            let unitsRemaining = remainingHours / unitHours
-            let sigmaPerUnit = variation.coefficient * ratePerHour * unitHours
+            // Units of *activity* rather than of clock. Two of the three days left in a week
+            // being nights and a weekend does not merely lower the centre of the forecast; it
+            // lowers how much those days can vary, because most of what could have varied is time
+            // nobody was ever going to spend.
+            let unitsRemaining = remainingMass / unitHours
+            let sigmaPerUnit = variation.coefficient * ratePerMass * unitHours
             let spread = unitsRemaining + unitsRemaining * unitsRemaining / Double(variation.count)
             let halfWidth = confidenceT(df: variation.count - 1) * sigmaPerUnit * spread.squareRoot()
             band = halfWidth.isFinite ? halfWidth : nil
         }
+
+        let shape = ForecastShape(
+            elapsedHours: elapsedHours,
+            elapsedMass: elapsedMass,
+            remainingHours: remainingHours,
+            remainingMass: remainingMass,
+            ratePerMass: ratePerMass,
+            activityMultiplier: multiplier,
+            persistence: persistence,
+            runningAgents: signal?.runningAgents ?? 0,
+            profileDays: profile.observedDays,
+            quietHours: profile.quietHours(from: now, to: resetsAt, calendar: calendar),
+            profile: profile)
 
         // A wide interval is rendered, never withdrawn. Pacing's centre is the window's own
         // consumption over the window's own elapsed time — arithmetic on two observed
@@ -614,15 +689,17 @@ public enum ProjectionEngine {
         return Projection(
             kind: kind,
             basis: .paced,
-            percentPerHour: ratePerHour,
+            percentPerHour: percentPerHour,
             currentPercent: currentPercent,
-            timeToCap: capTime(
-                currentPercent: currentPercent, percentPerHour: ratePerHour,
-                resetsAt: resetsAt, now: now),
+            timeToCap: shapedCapTime(
+                currentPercent: currentPercent, ratePerMass: ratePerMass, profile: profile,
+                multiplier: multiplier, persistence: persistence, resetsAt: resetsAt, now: now,
+                calendar: calendar),
             projectedAtReset: projectedAtReset,
             projectedBand: band,
             resetsAt: resetsAt,
-            sampleCount: 0
+            sampleCount: 0,
+            shape: shape
         )
     }
 
@@ -649,14 +726,14 @@ public enum ProjectionEngine {
     }
 
     private static func measuredVariation(
-        kind: WindowKind, events: [UsageEvent], now: Date
+        kind: WindowKind, events: [UsageEvent], now: Date, calendar: Calendar = .current
     ) -> (coefficient: Double, count: Int)? {
         switch kind {
         case .sevenDay:
-            return dailyVariation(events: events, now: now)
+            return dailyVariation(events: events, now: now, calendar: calendar)
                 .map { (coefficient: $0.coefficient, count: $0.days) }
         case .fiveHour:
-            return hourlyVariation(events: events, now: now)
+            return hourlyVariation(events: events, now: now, calendar: calendar)
                 .map { (coefficient: $0.coefficient, count: $0.hours) }
         }
     }
@@ -666,6 +743,30 @@ public enum ProjectionEngine {
     private static func clampedProjection(_ value: Double) -> Double? {
         guard value.isFinite else { return nil }
         return min(max(value, 0), displayCeiling)
+    }
+
+    /// When the shaped forecast crosses 100%: the instant by which enough *activity* has accrued
+    /// to spend the headroom, rather than enough clock.
+    ///
+    /// This is where the shape is most visible to a reader. A window with 12 points of headroom
+    /// and a pace of one point per active hour does not cap twelve hours from now if nine of
+    /// those hours are the middle of the night — it caps some time tomorrow morning, and saying
+    /// so is the difference between a warning that can be acted on and one that cannot. The
+    /// live multiplier is carried into it too, so a fan-out running right now pulls the estimate
+    /// in rather than leaving the row to discover the cap when it arrives.
+    ///
+    /// Returns nil when the cap is further out than the reset, matching `capTime`.
+    private static func shapedCapTime(
+        currentPercent: Double, ratePerMass: Double, profile: ActivityProfile,
+        multiplier: Double, persistence: TimeInterval, resetsAt: Date, now: Date, calendar: Calendar
+    ) -> Date? {
+        guard ratePerMass.isFinite, ratePerMass > 0, currentPercent.isFinite,
+            currentPercent < 100, resetsAt > now
+        else { return nil }
+        let headroom = (100 - currentPercent) / ratePerMass
+        return profile.instant(
+            reachingMass: headroom, from: now, by: resetsAt, multiplier: multiplier,
+            persistence: persistence, calendar: calendar)
     }
 
     /// When the fitted line crosses 100%. Unclamped by `displayCeiling` on purpose: the

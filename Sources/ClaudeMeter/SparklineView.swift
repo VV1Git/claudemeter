@@ -27,6 +27,10 @@ struct SparklineView: View {
     /// minutes on 30 July, up to five under backoff, four or five times a day — and "no history
     /// yet" would read as data loss where the truth is that the period just opened.
     private let hasAnySamples: Bool
+    /// The horizon's activity fractions, or empty when the forecast is on the flat clock and a
+    /// two-point line is already the truth. Resolved here for the same reason as `points`: both
+    /// the dashed centre and the cone are built from it, and it walks the hours to the reset.
+    private let forecastProgress: [(t: Date, fraction: Double)]
 
     /// `resetsAt` is its own parameter rather than read off `projection` because `PanelView`
     /// nils the projection during an outage while the cached snapshot still knows the period.
@@ -52,7 +56,20 @@ struct SparklineView: View {
             .enumerated()
             .map { Point(id: $0.offset, t: $0.element.t, percent: $0.element.percent(for: kind) ?? 0) }
         self.hasAnySamples = samples.contains { $0.percent(for: kind) != nil }
+
+        if let shape = projection?.shape, shape.isShaped,
+            let horizon = projection?.resetsAt, horizon > now
+        {
+            self.forecastProgress = shape.progress(
+                from: now, to: horizon, maximumPoints: Self.forecastPoints)
+        } else {
+            self.forecastProgress = []
+        }
     }
+
+    /// Points the forecast is drawn with at most. A week has 168 hour boundaries and this chart is
+    /// a few hundred points wide, so past this the extra marks are subpixel.
+    private static let forecastPoints = 72
 
     private struct Point: Identifiable {
         let id: Int
@@ -237,10 +254,24 @@ struct SparklineView: View {
             let projectedAtReset = projection.projectedAtReset, projectedAtReset.isFinite,
             projection.currentPercent.isFinite
         else { return [] }
-        return [
-            Point(id: 0, t: now, percent: projection.currentPercent),
-            Point(id: 1, t: resetsAt, percent: projectedAtReset),
-        ]
+        let current = projection.currentPercent
+        // Plotted against the account's own activity clock where there is one. A straight dashed
+        // line to the endpoint would draw the window climbing steadily through two nights it is
+        // going to spend asleep — the endpoint shaped and every point on the way to it flat — and
+        // the shape of that line is most of what a glance at this chart takes from it.
+        let steps = forecastProgress
+        guard steps.count > 1 else {
+            return [
+                Point(id: 0, t: now, percent: current),
+                Point(id: 1, t: resetsAt, percent: projectedAtReset),
+            ]
+        }
+        return [Point(id: 0, t: now, percent: current)]
+            + steps.enumerated().map { index, step in
+                Point(
+                    id: index + 1, t: step.t,
+                    percent: current + (projectedAtReset - current) * step.fraction)
+            }
     }
 
     /// The cone's endpoints come from `Projection` rather than from arithmetic here, so the
@@ -256,10 +287,25 @@ struct SparklineView: View {
             high - low > 0
         else { return [] }
         let current = projection.currentPercent
-        return [
-            BandPoint(id: 0, t: now, low: current, high: current),
-            BandPoint(id: 1, t: resetsAt, low: low, high: high),
-        ]
+        // Opened on the same clock as the line it contains. Left on the wall clock while the
+        // centre followed the activity one, the cone would narrow to nothing overnight around a
+        // line that had stopped climbing — and on the weekly window, whose lower edge is floored
+        // at the current reading, the centre would spend the night *below* the interval drawn
+        // around it.
+        let steps = forecastProgress
+        guard steps.count > 1 else {
+            return [
+                BandPoint(id: 0, t: now, low: current, high: current),
+                BandPoint(id: 1, t: resetsAt, low: low, high: high),
+            ]
+        }
+        return [BandPoint(id: 0, t: now, low: current, high: current)]
+            + steps.enumerated().map { index, step in
+                BandPoint(
+                    id: index + 1, t: step.t,
+                    low: current + (low - current) * step.fraction,
+                    high: current + (high - current) * step.fraction)
+            }
     }
 
     // MARK: Scales

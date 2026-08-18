@@ -337,12 +337,46 @@ struct ProjectionTests {
                 samples: series, events: [], now: Self.now))
 
         #expect(projection.basis == .paced)
-        // Four of the seven days are gone and half the budget with them: 12.5 points a day.
-        #expect(abs(projection.percentPerHour * 24 - 12.5) < 0.01)
-        // Three days left at that pace lands at 87.5%, not at the regression's several hundred.
+        // Four of the seven days are gone and half the budget with them: 12.5 points a day, and
+        // three days of that lands at 87.5%.
+        //
+        // The burst is not ignored, which is the point of `ActivitySignal` — it is *bounded*. No
+        // transcripts here, so the only live evidence is the poll series itself: 6.7 points in
+        // forty minutes against a window pacing 0.35 points over the same stretch, which pins the
+        // multiplier at its ceiling of 4. Believed for the neutral 45 minutes — nothing local
+        // says how long this has been running — that is 2.25 extra mean-hours on a 72-hour
+        // horizon, worth 1.2 points. The regression's answer to the same burst was several
+        // hundred percent; this one is 88.7%.
+        let shape = try #require(projection.shape)
+        #expect(shape.activityMultiplier == ActivitySignal.multiplierCeiling)
+        #expect(shape.profileDays == 0)  // no transcripts, so the clock stays flat
+        #expect(abs(projection.percentPerHour * 24 - 12.89) < 0.01)
         let projected = try #require(projection.projectedAtReset)
-        #expect(abs(projected - 87.5) < 0.1)
+        #expect(abs(projected - 88.67) < 0.05)
+        #expect(projected - 87.5 < 2)
         #expect(projected < 100)
+    }
+
+    @Test("With no history at all the weekly window paces exactly as the flat clock did")
+    func weeklyWithoutHistoryIsTheFlatPace() throws {
+        // The regression guard on the whole activity model: an account with no transcripts and no
+        // poll series has no shape and no live signal, and must therefore produce the arithmetic
+        // this engine has always produced — consumption over elapsed hours, carried across the
+        // hours remaining. Every mass below is a count of wall-clock hours by construction.
+        let resetsAt = Self.now.addingTimeInterval(3 * 24 * 3600)
+        let projection = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay,
+                snapshot: snapshot(sevenDay: LimitWindow(utilization: 50, resetsAt: resetsAt)),
+                samples: [], events: [], now: Self.now))
+
+        #expect(abs(projection.percentPerHour * 24 - 12.5) < 1e-9)
+        #expect(abs(try #require(projection.projectedAtReset) - 87.5) < 1e-9)
+        let shape = try #require(projection.shape)
+        #expect(shape.profileDays == 0)
+        #expect(shape.activityMultiplier == 1)
+        #expect(abs(shape.elapsedMass - shape.elapsedHours) < 1e-9)
+        #expect(abs(shape.remainingMass - shape.remainingHours) < 1e-9)
     }
 
     @Test("A weekly window barely open is not paced from a single quantization step")
@@ -504,8 +538,18 @@ struct ProjectionTests {
     /// Fourteen days of wildly uneven usage, which is what a real account looks like: one
     /// enormous day among a fortnight of quiet ones. This is the shape that used to blank the
     /// weekly row entirely.
-    private func lumpyFortnight(now: Date = ProjectionTests.now) -> [UsageEvent] {
-        let calendar = Calendar.current
+    /// A calendar fixed to UTC, for the tests whose answers depend on which local hour and
+    /// weekday an event lands in. `Calendar.current` would make those assertions a statement
+    /// about the machine running them.
+    private static let utc: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? .gmt
+        return calendar
+    }()
+
+    private func lumpyFortnight(
+        now: Date = ProjectionTests.now, calendar: Calendar = Calendar.current
+    ) -> [UsageEvent] {
         let today = calendar.startOfDay(for: now)
         var events: [UsageEvent] = []
         for offset in 1...14 {
@@ -524,20 +568,116 @@ struct ProjectionTests {
         // `bandIsInformative`'s ceiling, and the old code deleted the projection along with the
         // band — so the row printed a pace and nothing about where the week was heading.
         let resetsAt = Self.now.addingTimeInterval(2.24 * 24 * 3600)
+        let calendar = Self.utc
         let projection = try #require(
             ProjectionEngine.project(
                 kind: .sevenDay,
                 snapshot: snapshot(sevenDay: LimitWindow(utilization: 35, resetsAt: resetsAt)),
-                samples: [], events: lumpyFortnight(), now: Self.now))
+                samples: [], events: lumpyFortnight(calendar: calendar), now: Self.now,
+                calendar: calendar))
 
         #expect(projection.basis == .paced)
         let projected = try #require(projection.projectedAtReset)
         let band = try #require(projection.projectedBand)
         // Wide enough that the old gate would have withdrawn both, which is the whole point.
         #expect(!ProjectionEngine.bandIsInformative(band, currentPercent: 35))
-        // 35% consumed over 114.2 elapsed hours is 0.306 points an hour; 53.8 hours left of
-        // the window carries that to 51.5%, which is the number the row had been withholding.
-        #expect(abs(projected - 51.5) < 0.5)
+        // 35% consumed over 114.2 elapsed hours is 0.306 points an hour, and the flat clock
+        // carried that across the 53.8 hours left to 51.5%. On the activity clock it is 44.2%,
+        // and the difference is the whole case for shaping: this fixture spends everything it
+        // spends around midday, its one heavy day is a Wednesday, and the horizon left in the
+        // window contains a Thursday, a Friday and part of a Saturday. The elapsed stretch held
+        // 130 mean hours of expected work; the remaining one holds 34.
+        #expect(abs(projected - 44.2) < 0.5)
+        let shape = try #require(projection.shape)
+        #expect(shape.remainingMass < shape.remainingHours)
+        #expect(shape.elapsedMass > shape.elapsedHours)
+        #expect(shape.quietHours > 24)  // two nights and the small hours of a third
+    }
+
+    // MARK: - The weekly window is paced on the account's own clock
+
+    /// `days` complete days of office hours in UTC: one message an hour from 09:00 to 17:00,
+    /// nothing overnight.
+    private func officeHours(days: Int, now: Date = ProjectionTests.now) -> [UsageEvent] {
+        let calendar = Self.utc
+        let today = calendar.startOfDay(for: now)
+        var events: [UsageEvent] = []
+        for offset in 1...days {
+            guard let day = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
+            for hour in 9...17 {
+                events.append(
+                    event(
+                        "d\(offset)h\(hour)", at: day.addingTimeInterval(Double(hour) * 3600),
+                        output: 100_000))
+            }
+        }
+        return events
+    }
+
+    @Test("A week that resets across a night is not paced as if the night were working hours")
+    func theWeeklyForecastDiscountsTheNightAhead() throws {
+        // Thursday, eight in the evening, with fourteen hours of the week left — of which about
+        // twelve are the night. The flat clock prices those twelve like twelve afternoons.
+        let calendar = Self.utc
+        let evening = try #require(ISO8601.date(from: "2026-01-15T20:00:00Z"))
+        let resetsAt = evening.addingTimeInterval(14 * 3600)
+        let window = LimitWindow(utilization: 60, resetsAt: resetsAt)
+
+        let shaped = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay, snapshot: snapshot(sevenDay: window), samples: [],
+                events: officeHours(days: 21, now: evening), now: evening, calendar: calendar))
+        let flat = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay, snapshot: snapshot(sevenDay: window), samples: [], events: [],
+                now: evening, calendar: calendar))
+
+        let shape = try #require(shaped.shape)
+        #expect(shape.profileDays == 21)
+        // Fourteen hours of clock, about five hours of expected work.
+        #expect(shape.remainingHours > 13.9)
+        #expect(shape.remainingMass < 7)
+        #expect(shape.quietHours > 9)
+
+        // 60% over 154 elapsed hours is 0.39 points an hour; the flat clock carries that across
+        // all fourteen and lands at 65.5%. On this account's own clock the week ends where it
+        // very nearly already is, because almost nothing is going to happen between now and then.
+        let flatProjected = try #require(flat.projectedAtReset)
+        let shapedProjected = try #require(shaped.projectedAtReset)
+        #expect(abs(flatProjected - 65.5) < 0.2)
+        #expect(shapedProjected < 63)
+        #expect(shapedProjected > 60)
+        // And the interval narrows with it: most of what could have varied is time nobody was
+        // ever going to spend.
+        #expect(try #require(shaped.projectedBand) < #require(flat.projectedBand))
+    }
+
+    @Test("The cap warning lands in the morning rather than in the middle of the night")
+    func theCapWaitsForTheMorning() throws {
+        // Four points of headroom at eight in the evening, on a window pacing 0.8 points per hour
+        // of work. Divided by the clock that is twenty past one in the morning — a warning that
+        // would not have come true, at an hour nobody could act on it.
+        let calendar = Self.utc
+        let evening = try #require(ISO8601.date(from: "2026-01-15T20:00:00Z"))
+        let resetsAt = evening.addingTimeInterval(48 * 3600)
+        let window = LimitWindow(utilization: 96, resetsAt: resetsAt)
+
+        let shaped = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay, snapshot: snapshot(sevenDay: window), samples: [],
+                events: officeHours(days: 21, now: evening), now: evening, calendar: calendar))
+        let flat = try #require(
+            ProjectionEngine.project(
+                kind: .sevenDay, snapshot: snapshot(sevenDay: window), samples: [], events: [],
+                now: evening, calendar: calendar))
+
+        let shapedCap = try #require(shaped.timeToCap)
+        let flatCap = try #require(flat.timeToCap)
+        #expect(calendar.component(.hour, from: flatCap) < 6)
+        #expect(calendar.component(.hour, from: shapedCap) >= 8)
+        #expect(calendar.component(.hour, from: shapedCap) <= 13)
+        #expect(shapedCap.timeIntervalSince(flatCap) > 6 * 3600)
+        #expect(shaped.willCapEarly)
     }
 
     @Test("A paced weekly window always carries an interval, even with no history to measure")

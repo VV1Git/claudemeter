@@ -143,6 +143,22 @@ format follows your locale.
   supports one and the band is narrow enough to mean something; a band wider than 40 points is
   hidden rather than drawn.
 
+**The activity line.** `≈5h active of 14h left · busy now ×2.4 · 3 agents running`, in smaller grey
+type under the projection. It appears only when the forecast is not simply the reading divided by the
+clock, and each clause appears only when it has something to say:
+
+- `≈5h active of 14h left` — how much of the time before the reset this account usually works. Four
+  o'clock on a Sunday morning is not an hour anybody spends a rate limit in, and the forecast no
+  longer prices it as if it were. Absent when the horizon is about as busy as an average stretch of
+  the same length, which is what a whole week always averages out to.
+- `busy now ×2.4` or `quiet now ×0.4` — how the last half hour compares with what this account
+  usually does at this hour. It decays back to normal over roughly as long as the current stretch has
+  already run, so a burst moves the five-hour forecast a great deal and the weekly one by about a
+  point.
+- `3 agents running` — sub-agents that have produced a message within the idle gap. Work already
+  handed to a sub-agent keeps spending after the last message the app has seen, so their presence
+  holds the burst open longer.
+
 **The cap line.** `hits 100% in 1h20m`, in red with a warning triangle, appears when the window is on
 pace to exhaust before it resets. This is the same condition as the menu bar's cap dot.
 
@@ -161,18 +177,33 @@ projection line is suppressed — whenever the burn rate did not come from the p
 There are two ways the app can arrive at a rate:
 
 - **Measured.** A least-squares fit of utilization against time over the trailing 45 minutes of poll
-  samples. It requires at least four samples spanning at least ten minutes, and it is what produces
-  the confidence band. No badge is shown.
-- **Estimated.** When the series is too thin to fit, the rate is inferred from transcript token
-  velocity instead: the weighted tokens spent inside the current window are calibrated against the
-  utilization the API reports, which gives points-per-token without the app needing to know your
-  actual limits, and that factor is applied to the most recent 45 minutes of token spend. Tokens are
-  weighted by relative price rather than counted raw, because rate limits track something closer to
-  spend than to raw volume. This path is badged `estimated`, and it produces no confidence band.
+  samples. It requires at least four samples spanning at least ten minutes. The 5-hour window prefers
+  this whenever it has one; the weekly window never uses it, because a slope measured over 45 minutes
+  and carried across 168 hours is nonsense — on real data it projected 171% for a week that finished
+  at 23%. No badge is shown.
+- **Paced.** The utilization the API reports, divided by how much of the window has been spent and
+  carried across what is left of it. This needs no history at all and it is account-wide by
+  construction, so it sees usage from other machines, the desktop app and claude.ai. It is the
+  weekly window's normal path, and the 5-hour window's fallback when the series is too thin to fit —
+  where it is badged `estimated`, since there it is the weaker of two available answers.
 
-In practice you see `estimated` for the first several polls after a launch. The fit only looks at the
-trailing 45 minutes, so the persisted series helps after a quick restart but not after the app has
-been closed for hours: in that case the badge returns until the series refills.
+Pacing does not divide by hours. It divides by how much of the window's *activity* has been spent,
+where activity is this account's own rhythm: spend by hour of day times spend by weekday, measured
+over the last four whole weeks of transcripts and normalized so an average hour is worth 1. Nobody
+spends a rate limit while asleep, so a Friday-evening reading is not carried across two nights as
+though they were two working days. On top of that the forecast reads the present: the poll series
+says whether the limit is climbing faster than the window's own pace expects, and the transcripts say
+whether this machine is mid-burst and how long the stretch has run. The activity line under the
+projection reports both.
+
+All of it is shrunk toward plain wall-clock pacing when the evidence is thin. Under three complete
+days of transcripts there is no profile at all and the forecast is exactly the flat arithmetic; the
+shape strengthens as the days accumulate, and it can never move the pace by more than a factor of
+four in either direction.
+
+In practice you see `estimated` on the 5-hour row for the first several polls after a launch. The fit
+only looks at the trailing 45 minutes, so the persisted series helps after a quick restart but not
+after the app has been closed for hours: in that case the badge returns until the series refills.
 
 ### The rolling 5-hour window
 
@@ -194,6 +225,9 @@ old usage ages out. Three consequences look like bugs and are not.
 **Last 5 hours** plots utilization for the 5-hour window from the poll samples, with the projection
 continued to the reset as a dashed line and its confidence band as a faint cone. The x-axis
 deliberately runs past *now* to the reset time, because the question is where the window is heading.
+The dashed line follows the same activity clock the forecast is paced on rather than running straight
+to its endpoint, so on the weekly chart it levels off overnight and climbs again in the morning; the
+cone opens on that clock too.
 The section is absent entirely until the first poll has been recorded. This is the only section
 built from poll samples; everything below it comes from the transcripts.
 

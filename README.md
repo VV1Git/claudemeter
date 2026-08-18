@@ -53,9 +53,10 @@ breakdown is open, since that section alone is taller than a single column can s
   are unaffected.
 - Two meters, one per window, each with the percentage, a capsule bar, a reset line that switches
   from a countdown to a weekday-and-time once the reset is twelve hours or more out, a pace line
-  (`↗ 12 pts/hr · 63% at reset ± 4`), and a warning line when the window is on pace to hit 100%
-  early. A 5-hour projection paced from the snapshot instead of fitted from the poll series is
-  marked `estimated`.
+  (`↗ 12 pts/hr · 63% at reset ± 4`), a line saying why the forecast is not simply the reading
+  divided by the clock (`≈5h active of 14h left · busy now ×2.4 · 3 agents running`), and a warning
+  line when the window is on pace to hit 100% early. A 5-hour projection paced from the snapshot
+  instead of fitted from the poll series is marked `estimated`.
 - Three collapsible sections whose expanded state persists across launches: a chart of the last five
   hours of poll samples with the projection continued to the reset as a dashed line and its
   confidence band as a faint cone; recent sessions (project, age, duration, message count, input-side
@@ -174,9 +175,31 @@ them. Both matter, because at the starting cadence of 180 seconds four samples s
 the span is the condition still outstanding at that point, and a further poll is what clears it. Once
 the fit exists the projection is labelled `measured`. Until then — after a fresh install, and again
 after any gap long enough to empty the trailing window — the 5-hour window is *paced* like the
-weekly one: the utilization the API reports, divided by how long the window has been open, carried
-forward at that average. That needs no history at all, and it counts every source the account is
-charged for, which is the point. It is labelled `estimated` to distinguish it from the fit.
+weekly one: the utilization the API reports, divided by how much of the window has been spent,
+carried forward across what is left of it. That needs no history at all, and it counts every source
+the account is charged for, which is the point. It is labelled `estimated` to distinguish it from
+the fit.
+
+**Pacing runs on the account's own clock, not the wall clock.** "How much of the window has been
+spent" is not measured in hours, because nobody spends a rate limit in their sleep. The app builds a
+profile of when this account actually works — spend by local hour of day times spend by local
+weekday, over the last four whole weeks of transcripts — and paces against *that*. A window is
+divided by the activity it has been open across and multiplied by the activity still ahead of it, so
+a Friday evening reading is no longer carried across two nights as if they were two working days.
+The same clock moves the cap warning: a budget that runs out overnight now runs out the following
+morning, which is when it will actually run out.
+
+On top of the profile the forecast reads what is happening *right now*, from two sources at once.
+The poll series says whether the limit is climbing faster than the window's own pace expects — which
+covers other machines and the desktop app — and the transcripts say whether this machine is
+mid-burst, how many sub-agents are running in it, and how long the stretch has already lasted. A
+burst is believed for about as long as it has already run and then decays back to the profile, so it
+is worth points on a five-hour horizon and about a point on a weekly one, rather than being
+multiplied across three days.
+
+Both are shrunk hard toward the flat clock when the evidence is thin: under three complete days of
+transcripts produces exactly the wall-clock pacing this replaces, and the shape strengthens as the
+days accumulate.
 
 This used to be done from local transcript tokens, calibrated against the current utilization to get
 points-per-token. That reads zero whenever the window's usage came from claude.ai, the desktop app or
@@ -322,7 +345,8 @@ Sources/UsageCore/            pure logic; no SwiftUI, no AppKit
   SampleStore.swift           poll history (JSONL) and the offline snapshot cache
   Aggregates.swift            sessions, daily buckets, model/effort splits, time spent
   Pricing.swift               published rates and cost equivalence
-  Projection.swift            reset detection, burn-rate fit, time-to-cap
+  Projection.swift            reset detection, burn-rate fit, pacing, time-to-cap
+  ActivityProfile.swift       when this account works, and what is running right now
   MenuBarLabelText.swift      the menu bar string, formatted here so it can be tested
 
 Sources/ClaudeMeter/          SwiftUI, AppKit, Charts
@@ -520,6 +544,45 @@ stored offset set without a trustworthy event cache is refused outright.
 
 Settings surfaces the ratio of rows read to distinct requests, so the app's totals being lower than a
 naive sum over the same files has a visible explanation.
+
+### The forecast is paced on an activity clock, and everything it feeds runs on the same one
+
+Pacing a limit against wall-clock time assumes usage is spread evenly across it. It is not: a
+fortnight of this account's transcripts has seven empty days in it, and no day has work in more than
+about a third of its hours. Dividing consumption by elapsed hours and multiplying by remaining hours
+therefore answers a question nobody asked — what would happen if the next three days were spent the
+way the average *hour* was spent, rather than the way the next three days will actually be spent.
+
+`ActivityProfile` replaces the hours with *mean hours of activity*: an hour-of-day shape times a
+day-of-week shape, each normalized to mean 1. Normalization is what makes it legitimate. Only the
+shape comes from local transcripts, never the level — a ratio is unchanged by whatever constant
+fraction of the account's work happens on machines this app cannot see, which is the same defence
+the confidence interval's coefficient of variation already stands on.
+
+Three guards keep a shape estimated from one machine from overpowering a measurement:
+
+- **Shrinkage.** Both shapes are pulled toward flat by how much was observed — half strength at a
+  week for the hour shape, at two weeks for the weekday shape. Under three complete days there is no
+  shape at all, so a new install produces the old arithmetic exactly.
+- **A floor under every hour.** An hour that saw no work in four weeks is not an hour in which work
+  is impossible, and a zero would divide the pace by a mass of nothing.
+- **Bounded leverage.** The profile may move the measured pace by at most a factor of four in either
+  direction (`ProjectionEngine.massLeverage`). A week that turns over at 04:00 spends its first
+  hours in the profile's basement, and without a clamp that would multiply its pace without bound.
+
+Everything downstream is denominated in the same unit, which is what keeps the panel self-consistent:
+the confidence interval counts *days of activity* rather than days of clock, so a horizon that is
+mostly night carries proportionally less uncertainty as well as less usage; the cap warning walks the
+same curve instead of dividing headroom by a rate; and the chart plots the dashed forecast and its
+cone against accumulated activity, so the line levels off overnight and climbs in the morning instead
+of ramping straight through both.
+
+One consequence worth stating: bucketing events by local day and hour is done through `LocalDayIndex`
+rather than by calling `Calendar` per event. `startOfDay(for:)` and `component(.hour, from:)` cost a
+few microseconds each, which at 32,000 events — an ordinary corpus here — came to 160ms per profile,
+on the main actor, on every poll. Consulting the calendar 29 times up front and binary-searching the
+boundaries after that brings the whole projection pass to under 9ms, which is less than it cost
+before any of this was added.
 
 ### The 5-hour window is rolling, so a falling percentage is not a reset
 

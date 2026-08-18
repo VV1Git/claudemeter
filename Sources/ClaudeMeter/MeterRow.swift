@@ -62,6 +62,13 @@ struct MeterRow: View {
                 }
             }
 
+            if let shapeText {
+                Text(shapeText)
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+            }
+
             if let capText {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -239,6 +246,67 @@ struct MeterRow: View {
             clause += " ± \(Self.integer(band))"
         }
         return clause
+    }
+
+    /// Why the forecast above is not the one a flat clock would give: how much of the horizon
+    /// this account usually works, and what is running on it right now.
+    ///
+    /// The row states a number that no longer follows from dividing the reading by the hours
+    /// left, so it has to be able to say where the difference came from — otherwise the only way
+    /// to check the forecast is to trust it. Both clauses are measurements the projection was
+    /// actually built from, carried out of the engine on `ForecastShape` rather than recomputed
+    /// here, so this line cannot disagree with the number it explains.
+    ///
+    /// Each clause suppresses itself when it has nothing to say, which is most of the time: over
+    /// a whole week the quiet hours and the busy ones average out and the activity clock lands
+    /// back on the wall clock, and a live multiplier near 1 is the account behaving as usual.
+    private var shapeText: String? {
+        guard let shape = projection?.shape, shape.isShaped else { return nil }
+        var clauses: [String] = []
+
+        // Only when the horizon is materially quieter or busier than an average stretch of the
+        // same length — a fifth, which is about a night inside a working day.
+        if let intensity = shape.remainingIntensity, abs(intensity - 1) >= 0.2,
+            shape.remainingHours >= 1
+        {
+            clauses.append(
+                "≈\(Self.integer(shape.remainingMass))h active of "
+                    + "\(Self.integer(shape.remainingHours))h left")
+        }
+
+        // The number this forecast replaced, whenever the two differ by enough to notice. The
+        // clause above states the *mechanism* and suppresses itself when no single hour of the
+        // horizon is unusual; this one states the *size* of the difference, which is what a reader
+        // comparing the row against their own arithmetic actually wants. On this account's live
+        // weekly reading the two were 7 points apart while the horizon was a tenth off average —
+        // so the mechanism clause was hidden and the row explained nothing.
+        if let projected = projection?.projectedAtReset, let flat = shape.flatProjectedAtReset,
+            flat.isFinite, abs(projected - flat) >= 2
+        {
+            clauses.append("\(Self.integer(flat))% on the wall clock")
+        }
+
+        let multiplier = shape.activityMultiplier
+        if multiplier >= 1.25 {
+            clauses.append("busy now ×\(Self.multiple(multiplier))")
+        } else if multiplier <= 0.75 {
+            clauses.append("quiet now ×\(Self.multiple(multiplier))")
+        }
+
+        if shape.runningAgents > 0 {
+            clauses.append(
+                "\(shape.runningAgents) agent\(shape.runningAgents == 1 ? "" : "s") running")
+        }
+
+        // Three is what the row's width takes. They are ordered most-explanatory first, so a
+        // fourth clause is always the least informative one present.
+        return clauses.isEmpty ? nil : clauses.prefix(3).joined(separator: " · ")
+    }
+
+    /// One decimal, because the multiplier's whole range is 0.2 to 4 and rounding it to whole
+    /// numbers would print every lull as ×0 and most bursts as ×1.
+    private static func multiple(_ value: Double) -> String {
+        String(format: "%.1f", min(max(value, 0), 99))
     }
 
     /// `compactDuration` answers `now` for anything under a minute — and for a cap time that has

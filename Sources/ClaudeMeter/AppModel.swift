@@ -380,20 +380,28 @@ import UsageCore
     /// The projections alone, which are cheap enough to keep synchronous.
     ///
     /// `ProjectionEngine.project` fits a burn rate over the trailing sample series and reads the
-    /// events only for a variation estimate, so it is a different order of work from the rollups
-    /// above and a poll can afford it inline. The calibration it used to drag along with it — two
-    /// full passes over the corpus — has moved to `recomputeAggregates`, which is why a poll now
-    /// schedules that rather than doing the work itself.
+    /// events for a variation estimate, an activity profile and a live-burst signal, so it is a
+    /// different order of work from the rollups above and a poll can afford it inline. The
+    /// calibration it used to drag along with it — two full passes over the corpus — has moved to
+    /// `recomputeAggregates`, which is why a poll now schedules that rather than doing the work
+    /// itself.
+    ///
+    /// The idle gap comes from the same preference the sessions list is clustered with. It is the
+    /// user's own answer to "how long a pause means I have stopped working", and the projection
+    /// asks exactly that question of the last few minutes.
     private func recomputeProjections(now: Date) {
         guard let snapshot else {
             fiveHourProjection = nil
             sevenDayProjection = nil
             return
         }
+        let idleGap = Prefs.Current.activeGap()
         fiveHourProjection = ProjectionEngine.project(
-            kind: .fiveHour, snapshot: snapshot, samples: samples, events: events, now: now)
+            kind: .fiveHour, snapshot: snapshot, samples: samples, events: events, now: now,
+            idleGap: idleGap)
         sevenDayProjection = ProjectionEngine.project(
-            kind: .sevenDay, snapshot: snapshot, samples: samples, events: events, now: now)
+            kind: .sevenDay, snapshot: snapshot, samples: samples, events: events, now: now,
+            idleGap: idleGap)
     }
 
     // MARK: - Persisted state

@@ -546,11 +546,20 @@ public struct Projection: Sendable, Equatable {
     public let projectedBand: Double?
     public let resetsAt: Date?
     public let sampleCount: Int
+    /// What the activity model made of the horizon — the nights inside it, the burst running
+    /// across it, the pace it was carried forward at. Present on the paced path only; the
+    /// regression over a five-hour horizon does not shape anything, and a flat projection has
+    /// nothing to shape.
+    ///
+    /// Carried out with the projection rather than recomputed by the view, because a row that
+    /// explains a forecast from its own second opinion of the inputs is a row that can contradict
+    /// the number printed beside it.
+    public let shape: ForecastShape?
 
     public init(
         kind: WindowKind, basis: ProjectionBasis, percentPerHour: Double,
         currentPercent: Double, timeToCap: Date?, projectedAtReset: Double?,
-        projectedBand: Double?, resetsAt: Date?, sampleCount: Int
+        projectedBand: Double?, resetsAt: Date?, sampleCount: Int, shape: ForecastShape? = nil
     ) {
         self.kind = kind
         self.basis = basis
@@ -561,6 +570,7 @@ public struct Projection: Sendable, Equatable {
         self.projectedBand = projectedBand
         self.resetsAt = resetsAt
         self.sampleCount = sampleCount
+        self.shape = shape
     }
 
     /// The interval's endpoints, so the text row and the chart's cone cannot disagree about
