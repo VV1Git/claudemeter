@@ -151,6 +151,17 @@ struct SparklineView: View {
                 .foregroundStyle(tint.opacity(0.55))
             }
 
+            // The cap itself, drawn only once the forecast has gone past it. Under 100 the cap and
+            // the top of the plot are the same edge and marking it would just underline the frame;
+            // over it, `yUpper` grows to fit the projection and 100 stops being the edge — it
+            // becomes an unlabelled line somewhere mid-plot, and the breach the chart exists to
+            // show is left to be inferred from the axis ticks rather than seen.
+            if forecastExceedsLimit {
+                RuleMark(y: .value("Limit", 100))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .foregroundStyle(Color.secondary.opacity(0.65))
+            }
+
             // Where measurement stops and forecast begins. On a trailing domain this was the
             // right-hand edge and needed no mark; on the period the observed line is the
             // shorter segment — 14.6% of the width against the forecast's 31.9% on the live
@@ -278,6 +289,20 @@ struct SparklineView: View {
 
     private var yTicks: [Double] {
         yUpper > 100 ? [0, 100, yUpper] : [0, 50, 100]
+    }
+
+    /// Whether the forecast finishes the period over the cap, and so whether 100 needs marking.
+    ///
+    /// Keyed to the projection's centre rather than the top of its interval, for the same reason
+    /// `yUpper` is: a cone whose upper edge grazes 100 is the ordinary case on a window that is
+    /// merely busy, and a rule drawn for it would stand on almost every chart and stop meaning
+    /// anything. This is the same figure the axis grew to accommodate, so the line and the ceiling
+    /// can never disagree about whether the limit was passed.
+    private var forecastExceedsLimit: Bool {
+        guard let projectedAtReset = projection?.projectedAtReset, projectedAtReset.isFinite else {
+            return false
+        }
+        return projectedAtReset > 100
     }
 
     // MARK: Coverage
