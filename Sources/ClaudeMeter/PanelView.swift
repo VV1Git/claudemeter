@@ -143,11 +143,30 @@ struct PanelView: View {
     /// scroller floats above the content and takes none. This is the term that made the earlier
     /// attempt at this arithmetic come out low. It is worth 15pt, and it is a live system
     /// setting, so it is read rather than baked in.
-    private static var scrollerAllowance: CGFloat {
-        NSScroller.preferredScrollerStyle == .legacy
-            ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
-            : 0
+    ///
+    /// Only charged when a scroller is actually going to be there — see `scrolls`. With *Show
+    /// scroll bars: Always* set, the style is legacy whether or not this panel scrolls, so
+    /// charging it unconditionally reserved 15pt of dead space on every panel that fits.
+    private var scrollerAllowance: CGFloat {
+        guard scrolls, NSScroller.preferredScrollerStyle == .legacy else { return 0 }
+        return NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
     }
+
+    /// Whether the content genuinely exceeds the room available, which is the only circumstance in
+    /// which a scroll indicator has anything to say.
+    ///
+    /// The panel sizes its own window to its content, so in the ordinary case there is nothing to
+    /// scroll to — and yet under *Show scroll bars: Always* AppKit drew a full-height scroller
+    /// anyway, permanently, over a view that could not move. Worse than ornamental: a legacy
+    /// scroller takes its width from the content, so the narrow form's 292pt of measured content
+    /// width was really 277, every caption wrapped a line earlier than the layout arithmetic
+    /// assumed, and `narrowContentWidth` frames overhung the space left for them.
+    ///
+    /// The half-point of slack is not superstition. `contentHeight` is measured by
+    /// `GeometryReader` and arrives fractional, while the window it is imposed on lands on whole
+    /// points; without slack a content height of 612.67 against a 612pt window is a two-thirds of
+    /// a point scroll range, which is exactly the useless scroller this is meant to prevent.
+    private var scrolls: Bool { contentHeight > maximumHeight + 1 }
 
     /// The two-column form's width, stated rather than inferred — animating towards a width
     /// means naming it, because `.frame(width:)` cannot interpolate towards `nil`.
@@ -155,9 +174,13 @@ struct PanelView: View {
     /// 300 + 16 + 1 + 16 + 300 + 14·2 + 15 = 676, which is what the panel window measures.
     /// Erring generous is the safe direction: a few points spare leave dead space on the right,
     /// where a few points short clip both columns against the window edge.
-    private static var wideWidth: CGFloat {
-        columnWidth * 2 + columnGap * 2 + dividerThickness
-            + horizontalPadding * 2 + scrollerAllowance
+    /// An instance property rather than a static because `scrollerAllowance` now depends on
+    /// whether this panel scrolls. Safe from the feedback that would imply: in the wide form each
+    /// column is a fixed `columnWidth`, so the allowance is outer dead space only and cannot
+    /// change the measured content height that decides `scrolls`.
+    private var wideWidth: CGFloat {
+        Self.columnWidth * 2 + Self.columnGap * 2 + Self.dividerThickness
+            + Self.horizontalPadding * 2 + scrollerAllowance
     }
 
     /// Natural height of the content, measured rather than assumed.
@@ -220,8 +243,19 @@ struct PanelView: View {
     private var maximumHeight: CGFloat {
         let visible = PanelAnchor.statusItemScreen?.visibleFrame.height
             ?? NSScreen.main?.visibleFrame.height ?? 900
-        return max(400, visible - 48)
+        return max(400, visible - Self.bottomClearance)
     }
+
+    /// Gap left between the bottom of the panel and the top of the Dock.
+    ///
+    /// Small on purpose. `visibleFrame` has already subtracted the menu bar and the Dock, so this
+    /// is pure breathing room and every point of it is a point the content cannot have. It was 48,
+    /// and 48 was measured to be actively harmful: with every section open this panel wants 940
+    /// points and the cap stood at 936, so it scrolled — by four points, which under *Show scroll
+    /// bars: Always* is a full-height scroller permanently down the side of a panel with nothing
+    /// to show below the fold. Twelve is enough to read as a margin and leaves the four points
+    /// where they belong.
+    private static let bottomClearance: CGFloat = 12
 
     var body: some View {
         ScrollView(.vertical) {
@@ -239,6 +273,11 @@ struct PanelView: View {
         // horizontally is what lets the growing window *uncover* the second column, and adding a
         // horizontal axis would turn that reveal into a scrollable overflow instead.
         .scrollBounceBehavior(.basedOnSize)
+        // `.basedOnSize` governs the bounce, not the indicator, and under *Show scroll bars:
+        // Always* the indicator is drawn regardless — a permanent scroller down a panel sized to
+        // its own content, with nowhere to scroll to. Shown only when there is genuinely something
+        // below the fold, which on a panel capped at the screen height is rare.
+        .scrollIndicators(scrolls ? .visible : .never)
         // Both forms state a width, because a window can only be animated towards a number. The
         // earlier version left the wide form at `nil` and let the content size itself, which is
         // correct at rest and unanimatable in flight — so the panel arrived at its new width in
@@ -252,7 +291,7 @@ struct PanelView: View {
         // values the content is.
         .modifier(
             PanelSize(
-                width: isWide ? Self.wideWidth : Self.narrowWidth,
+                width: isWide ? wideWidth : Self.narrowWidth,
                 height: contentHeight > 0 ? min(contentHeight, maximumHeight) : 0))
         .onPreferenceChange(ContentHeightKey.self) { height in
             contentHeight = height
