@@ -2,27 +2,38 @@ import AppKit
 import SwiftUI
 import UsageCore
 
-/// The ring drawn in the menu bar.
+/// The ring drawn in the menu bar, and the badge beside it when the reading is not live.
 ///
-/// `MenuBarExtra`'s label only reliably renders `Text` and `Image`, so the ring is rasterised
-/// into an `NSImage` instead of being a live SwiftUI shape. The image is deliberately *not* a
-/// template image: the status bar re-tints templates monochrome, which would throw away the
-/// amber and red the severity colour exists to communicate.
+/// `MenuBarExtra`'s label only reliably renders `Text` and `Image` — and, measured here, only the
+/// first of each: an `Image` added after the `Text` was silently dropped, which is why the badge
+/// is composited into this bitmap rather than being a sibling view. The ring is rasterised into an
+/// `NSImage` for the same reason. The image is deliberately *not* a template image: the status bar
+/// re-tints templates monochrome, which would throw away the amber and red the severity colour
+/// exists to communicate, and would take the badge's tint with them.
 @MainActor
 public enum MenuBarIcon {
-    /// Point size of the rendered square image.
+    /// Point size of the ring, and the height of the rendered image.
     public static let side: CGFloat = 18
+    /// Width the badge glyph is given when there is one, plus the gap before it. Not private:
+    /// `RingIcon` draws to these, and a second copy of the number there would let the drawn glyph
+    /// and the space reserved for it drift apart.
+    static let badgeWidth: CGFloat = 13
+    static let badgeGap: CGFloat = 3
 
-    /// An `side`×`side` ring filled clockwise from 12 o'clock to `percent` (0–100), tinted by
-    /// `severity`. `showsCapDot` adds a filled centre dot for `Projection.willCapEarly`.
-    public static func image(percent: Double?, severity: Severity, showsCapDot: Bool) -> NSImage {
+    /// A ring filled clockwise from 12 o'clock to `percent` (0–100), tinted by `severity`.
+    /// `showsCapDot` adds a filled centre dot for `Projection.willCapEarly`. `badge` is an SF
+    /// Symbol name drawn to the right of the ring, for a reading that has stopped being live.
+    public static func image(
+        percent: Double?, severity: Severity, showsCapDot: Bool, badge: String? = nil
+    ) -> NSImage {
         let key = Key(
             percent: percent.map { Int(min(100, max(0, $0)).rounded()) },
             severity: severity,
             capDot: showsCapDot,
             dark: menuBarIsDark,
             scale: rasterScale,
-            accent: accentComponents
+            accent: accentComponents,
+            badge: badge
         )
         if let cached = cache[key] { return cached }
         let rendered = render(key)
@@ -48,6 +59,9 @@ public enum MenuBarIcon {
         let dark: Bool
         let scale: CGFloat
         let accent: Int
+        /// Part of the key because it changes the bitmap's *width*, not just its pixels — a cached
+        /// ring reused for a badged state would be the wrong size as well as the wrong picture.
+        let badge: String?
     }
 
     /// A rasterised image cannot re-resolve semantic colours when the appearance flips, so the
@@ -78,7 +92,8 @@ public enum MenuBarIcon {
 
     private static func render(_ key: Key) -> NSImage {
         let renderer = ImageRenderer(
-            content: RingIcon(percent: key.percent, severity: key.severity, capDot: key.capDot)
+            content: RingIcon(
+                percent: key.percent, severity: key.severity, capDot: key.capDot, badge: key.badge)
                 .environment(\.colorScheme, key.dark ? .dark : .light)
         )
         renderer.scale = key.scale
@@ -87,13 +102,17 @@ public enum MenuBarIcon {
         // `scale`, so the pixels come from there and the point size is pinned here. That is what
         // keeps an @2× ring an 18pt item instead of a 36pt one, and what keeps it crisp when the
         // sharpest screen is not the main one.
-        guard let bitmap = renderer.cgImage else {
-            return NSImage(size: CGSize(width: side, height: side))
-        }
-        let image = NSImage(cgImage: bitmap, size: CGSize(width: side, height: side))
+        let size = CGSize(width: width(for: key.badge), height: side)
+        guard let bitmap = renderer.cgImage else { return NSImage(size: size) }
+        let image = NSImage(cgImage: bitmap, size: size)
         image.isTemplate = false
         image.accessibilityDescription = accessibilityDescription(for: key)
         return image
+    }
+
+    /// The image's point width: the ring alone, or the ring plus the gap and the badge.
+    static func width(for badge: String?) -> CGFloat {
+        badge == nil ? side : side + badgeGap + badgeWidth
     }
 
     private static func accessibilityDescription(for key: Key) -> String {
@@ -107,10 +126,28 @@ private struct RingIcon: View {
     let percent: Int?
     let severity: Severity
     let capDot: Bool
+    var badge: String?
 
     private let lineWidth: CGFloat = 2.4
 
     var body: some View {
+        HStack(spacing: MenuBarIcon.badgeGap) {
+            ring
+            if let badge {
+                // Sized against the ring rather than by font, so the two read as one item. The
+                // warning tint is the whole point: a monochrome glyph among the menu bar's other
+                // monochrome glyphs is not something anyone notices, and noticing is the job.
+                Image(systemName: badge)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .foregroundStyle(SeverityStyle.color(.warning))
+                    .frame(width: MenuBarIcon.badgeWidth, height: MenuBarIcon.badgeWidth)
+            }
+        }
+        .frame(width: MenuBarIcon.width(for: badge), height: MenuBarIcon.side)
+    }
+
+    private var ring: some View {
         ZStack {
             Circle()
                 .stroke(Color.primary.opacity(0.22), lineWidth: lineWidth)

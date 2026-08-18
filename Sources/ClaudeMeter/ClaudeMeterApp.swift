@@ -76,19 +76,29 @@ private struct MenuBarLabel: View {
         )
 
         return HStack(spacing: 3) {
+            // The badge rides inside this image rather than beside it as its own `Image`. A
+            // `MenuBarExtra` label renders the first `Image` and the first `Text` and drops what
+            // follows — a sibling badge was simply never drawn, which is the sort of thing only a
+            // screenshot tells you.
             Image(nsImage: MenuBarIcon.image(
                 percent: window?.utilization,
                 severity: model.snapshot?.severity(for: .fiveHour) ?? .normal,
-                showsCapDot: projection?.willCapEarly ?? false
+                showsCapDot: projection?.willCapEarly ?? false,
+                badge: status?.symbol
             ))
             .renderingMode(.original)
+            .accessibilityLabel(Text(status?.description ?? "Claude usage"))
 
             if !text.isEmpty {
                 Text(text).monospacedDigit()
             }
         }
+        .help(status?.description ?? "")
         .onReceive(Self.ticker) { now = $0 }
     }
+
+    /// The badge, when the figures beside it are not live. Nil is the ordinary case.
+    private var status: MenuBarStatus? { MenuBarStatus.forHealth(model.health) }
 
     private var format: MenuBarFormat {
         MenuBarFormat(rawValue: formatRaw) ?? Prefs.Default.menuBarFormat

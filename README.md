@@ -35,13 +35,20 @@ Four text formats are available (the settings labels use illustrative values):
 The pace arrow is suppressed when the projection lands within a point of the current value, since a
 label that reads `42% → 42%` is noise, not information.
 
+An amber badge appears beside the ring whenever the figure next to it has stopped being live — a
+lock when ClaudeMeter needs Keychain access, an hourglass while it waits for `claude` to renew, a
+warning triangle for a credential nobody can renew, a crossed-out Wi-Fi when the endpoint is
+unreachable. Without it a meter that stopped an hour ago is indistinguishable from one that updated
+a second ago, since the ring goes on confidently drawing the last percentage it was handed.
+
 ### Panel
 
 Clicking the item opens a window (not an `NSMenu`, because Swift Charts and disclosure groups do
 not render inside one). It is one column while the sections are closed and two once the daily
 breakdown is open, since that section alone is taller than a single column can show. Top to bottom:
 
-- A notice when something is wrong: not signed in, credentials beyond renewal, or offline with the
+- A notice when something is wrong: not signed in, credentials beyond renewal, Keychain access
+  needed with a one-press *Authorize…*, or offline with the
   reason, when the next request is due, and a reminder that the transcript-derived statistics below
   are unaffected.
 - Two meters, one per window, each with the percentage, a capsule bar, a reset line that switches

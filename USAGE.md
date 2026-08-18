@@ -72,8 +72,28 @@ A switch between light and dark mode invalidates the label immediately, but noth
 of system accent colour, so a new accent reaches the ring on the label's next tick, roughly every
 thirty seconds — the timer allows a few seconds' latitude, so it is not a guaranteed bound. Nothing is broken if the ring keeps the old accent for a few seconds after you change it.
 
+An **amber symbol beside the ring** means the number next to it is not live. The ring draws the last
+percentage it was given and goes on drawing it, so without this a meter that stopped an hour ago
+looks exactly like one that updated a second ago. The symbol says which kind of stopped it is, and
+hovering the item spells it out:
+
+| Symbol | Meaning | What clears it |
+| --- | --- | --- |
+| Lock | ClaudeMeter needs Keychain access | Open the panel and press *Authorize* |
+| Hourglass | The token has aged out | Run any `claude` command |
+| Warning triangle | The token cannot be renewed by anybody | Sign in to Claude Code again |
+| Person with a question mark | Not signed in | Sign in to Claude Code |
+| Crossed-out Wi-Fi | Cannot reach the usage endpoint | Usually nothing; it retries on its own |
+
+The badge is composited into the same bitmap as the ring rather than added beside it as a second
+image. `MenuBarExtra` renders the first `Text` and the first `Image` in its label and silently drops
+what follows, so a sibling badge is simply never drawn — the sort of thing only a screenshot tells
+you.
+
 The ring carries an accessibility description of the form `Claude 5-hour usage 42 percent`, with
-`, on pace to run out before it resets` appended when the cap dot is showing.
+`, on pace to run out before it resets` appended when the cap dot is showing. When a badge is
+showing, that description is replaced by the badge's own sentence, since the state of the reading
+matters more than its value.
 
 ## Reading the panel
 
@@ -442,8 +462,8 @@ While offline:
   all four splits, cache hit, wall clock, agent hours, cost equivalents — none of it touches the
   network, and the rescan is checked after every poll attempt whether it succeeded or not. The
   offline notice says this explicitly.
-- The menu bar item itself carries no offline marker. It keeps showing the last reading, so treat the
-  panel as the authority on how fresh that number is.
+- The menu bar item shows a crossed-out Wi-Fi badge while it is offline, and keeps showing the last
+  reading beside it. The panel is still the authority on how old that reading is.
 - The notice tells you when the next attempt is due, which is the app's own backoff rather than the
   server's `Retry-After`. This endpoint answers a 429 with `Retry-After: 0`, which means "no delay
   supplied" and not "retry immediately", so surfacing it would contradict what the app actually does.
