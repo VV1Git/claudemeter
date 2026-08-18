@@ -292,6 +292,14 @@ struct PanelView: View {
                     .frame(width: Self.narrowContentWidth, alignment: .leading)
             }
 
+            // Kept out of `healthNotice` rather than folded into it: a lockout leaves this app's
+            // own numbers perfectly live, so `health` is `.live` and `healthNotice` is nil at
+            // exactly the moment this has to be on screen.
+            if model.cliLockedOut {
+                HealthNotice(notice: lockoutNotice)
+                    .frame(width: Self.narrowContentWidth, alignment: .leading)
+            }
+
             // One HStack in both forms, so the leading column keeps its identity across the
             // switch and only the breakdown changes parent. Branching between an HStack and a
             // VStack gave the two layouts *different* identities, and SwiftUI cross-faded
@@ -926,12 +934,46 @@ struct PanelView: View {
                     + "next poll.",
                 tint: SeverityStyle.color(.warning))
         case .staleCredentials:
+            // Which token died decides what the reader should do about it, and the two answers
+            // have nothing in common: one is a `claude` sign-in, the other is a field in this
+            // app's own Settings. Telling a user with a dedicated token to run `claude` sends
+            // them to fix a credential that was working fine.
+            return model.hasDedicatedToken
+                ? notice(
+                    symbol: "exclamationmark.triangle",
+                    title: "ClaudeMeter's token was refused",
+                    detail: "The token you gave ClaudeMeter no longer works. Run `claude "
+                        + "setup-token` again and paste the new one into Settings, or remove it "
+                        + "there to go back to reading Claude Code's credential.",
+                    tint: SeverityStyle.color(.warning))
+                : notice(
+                    symbol: "exclamationmark.triangle",
+                    title: "Sign in again",
+                    detail: "This token can no longer be renewed by anybody. Run `claude` and "
+                        + "sign in to restore it.",
+                    tint: SeverityStyle.color(.warning))
+        case .waitingForClaudeCode:
             return notice(
-                symbol: "exclamationmark.triangle",
-                title: "Sign in again",
-                detail: "ClaudeMeter renews Claude Code's token on its own, but this one can no "
-                    + "longer be renewed. Run `claude` and sign in to restore it.",
+                symbol: "clock.arrow.circlepath",
+                title: "Waiting for Claude Code",
+                detail: "The stored token has aged out. ClaudeMeter never renews Claude Code's "
+                    + "token — spending it would retire the copy the CLI is holding and sign you "
+                    + "out — so it waits. Run any `claude` command to refresh it, or give "
+                    + "ClaudeMeter a token of its own in Settings. The statistics below come from "
+                    + "your local transcripts and are unaffected.",
                 tint: SeverityStyle.color(.warning))
+        case .needsAuthorization:
+            return notice(
+                symbol: "lock",
+                title: "Keychain access needed",
+                detail: "Claude Code rewrote its credential, which resets the list of programs "
+                    + "macOS lets read it. Authorize ClaudeMeter once to carry on — or give it a "
+                    + "token of its own in Settings, which stops this happening at all. The "
+                    + "statistics below come from your local transcripts and are unaffected.",
+                tint: SeverityStyle.color(.warning),
+                action: HealthNotice.Notice.Action(title: "Authorize…") {
+                    Task { await model.authorizeKeychain() }
+                })
         case let .offline(since, reason):
             // "Rate limited" on its own reads as stuck. What the reader needs is when it will
             // try again, which is our backoff — not the server's `Retry-After`, which this
@@ -949,11 +991,44 @@ struct PanelView: View {
         }
     }
 
+    /// What the user needs when the shared item's partition list no longer admits Claude Code:
+    /// the fact of it, and the one line that undoes it.
+    ///
+    /// Carries no cached-numbers sentence, because a lockout says nothing about how fresh the
+    /// meters are — it is the CLI that has stopped working, not this app.
+    ///
+    /// ClaudeMeter cannot cause this any more; it never writes that item. What it can still do is
+    /// notice the damage a version that did left behind, and offer the repair once. After that
+    /// the notice does not come back.
+    ///
+    /// The command is offered only when one could be built from what was actually read — this
+    /// build's own code identity, and the identities on the item now. A repair line names every
+    /// identity that is to survive and drops the rest, so one built from a guess would evict
+    /// whichever identity this copy presents, and the user would pay a login password to break
+    /// the app that told them to.
+    private var lockoutNotice: HealthNotice.Notice {
+        let command = model.partitionRepairCommand
+        return HealthNotice.Notice(
+            symbol: "key.slash",
+            title: "Claude Code is locked out of the Keychain",
+            detail: "Something reset this item's list of permitted programs — an older "
+                + "ClaudeMeter did this when it saved a renewed token, which it no longer does. "
+                + "Every `claude` command will raise a password dialog until you restore it. "
+                + (command == nil
+                    ? "ClaudeMeter could not work out the exact command for this machine — run "
+                        + "scripts/repair-keychain-partition-list.sh from the ClaudeMeter source "
+                        + "instead."
+                    : "Paste this into a terminal and enter your login password when it asks."),
+            tint: SeverityStyle.color(.warning),
+            command: command)
+    }
+
     /// The cached-numbers sentence is appended only when there are cached numbers: on a first
     /// launch with no network the app has never read anything, `showsMeters` is false, and a
     /// notice claiming to show the last reading would be describing an empty panel.
     private func notice(
-        symbol: String, title: String, detail: String, tint: Color
+        symbol: String, title: String, detail: String, tint: Color,
+        action: HealthNotice.Notice.Action? = nil
     ) -> HealthNotice.Notice {
         HealthNotice.Notice(
             symbol: symbol,
@@ -961,7 +1036,8 @@ struct PanelView: View {
             detail: model.snapshot == nil
                 ? detail
                 : detail + " The meters below are the last reading, not live.",
-            tint: tint)
+            tint: tint,
+            action: action)
     }
 
     /// "Offline since 3:45 PM" needs a moment the numbers were true. With nothing cached, `since`
@@ -1021,9 +1097,24 @@ extension PanelView {
             let title: String
             let detail: String
             let tint: Color
+            /// A shell line the reader is meant to run. Offered as a button rather than as text
+            /// to select, because the repair it carries has to be typed exactly and a command
+            /// with one identity missing moves the lockout instead of clearing it.
+            var command: String?
+            /// Something the app can do about this state itself, when there is one.
+            var action: Action?
+
+            /// A button on the notice. Its whole reason to exist is the Keychain authorization:
+            /// that dialog must never appear unasked, so the app declines to raise it and puts
+            /// the decision here instead, where the user is the one who starts it.
+            struct Action {
+                let title: String
+                let perform: @MainActor () -> Void
+            }
         }
 
         let notice: Notice
+        @State private var copied = false
 
         var body: some View {
             HStack(alignment: .top, spacing: 8) {
@@ -1037,11 +1128,34 @@ extension PanelView {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let action = notice.action {
+                        Button(action.title) { action.perform() }
+                            .controlSize(.small)
+                            .padding(.top, 4)
+                    }
+                    if let command = notice.command {
+                        Button(copied ? "Copied" : "Copy repair command") { copy(command) }
+                            .controlSize(.small)
+                            .padding(.top, 4)
+                    }
                 }
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        }
+
+        /// The label reverts on its own: the panel closes and reopens constantly, and a button
+        /// still reading "Copied" from a press two hours ago claims a clipboard that has since
+        /// been overwritten several times.
+        private func copy(_ command: String) {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(command, forType: .string)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                copied = false
+            }
         }
     }
 }

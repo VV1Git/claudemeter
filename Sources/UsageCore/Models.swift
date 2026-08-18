@@ -608,6 +608,20 @@ public enum DataHealth: Sendable, Equatable {
     /// Credentials are present but beyond renewal — no refresh token, one that has expired
     /// in its own right, or one the server refused. Only a new sign-in clears this.
     case staleCredentials
+    /// The stored token has aged out and this app is deliberately leaving it alone.
+    ///
+    /// Renewing a token it does not own would mean spending Claude Code's refresh token, which
+    /// the endpoint rotates — the CLI's copy dies the moment it is spent, and the only way to
+    /// hand the replacement over is to write the shared item, which locks the CLI out of it.
+    /// Both branches break Claude Code, so this app takes neither and waits. Clears the next
+    /// time `claude` runs. Distinct from `staleCredentials`: nothing is wrong with the
+    /// credentials, and sending the user through a sign-in would fix nothing.
+    case waitingForClaudeCode
+    /// The credential item is there and this app is not currently allowed to decrypt it —
+    /// Claude Code rewrote the item, which resets its partition list to the CLI alone. One
+    /// authorization from the user clears it, and until then the panel offers that rather than
+    /// raising a dialog nobody asked for.
+    case needsAuthorization
     /// No usable credentials found in the Keychain at all.
     case noCredentials
 }

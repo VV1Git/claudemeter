@@ -79,6 +79,35 @@ struct TokenRefresherTests {
         #expect(tokens.refreshToken == "still-good")
     }
 
+    /// The three ways the wire can say "keep using the one you sent" all have to carry the sent
+    /// token forward, and a rotation has to replace it.
+    ///
+    /// This used to decide whether the shared Keychain item got written. It no longer decides
+    /// anything about that item — this app never writes it — but the same comparison still
+    /// governs the dedicated credential's own refresh chain, and getting it wrong there loses the
+    /// user's token rather than the CLI's.
+    @Test("A rotated refresh token replaces the sent one; every other shape keeps it")
+    func rotationReplacesTheSentToken() throws {
+        let omitted = try decode(
+            #"{"access_token": "new", "expires_in": 3600}"#, refreshedWith: "old-r")
+        #expect(omitted.refreshToken == "old-r")
+
+        let empty = try decode(
+            #"{"access_token": "new", "refresh_token": "", "expires_in": 3600}"#,
+            refreshedWith: "old-r")
+        #expect(empty.refreshToken == "old-r")
+
+        let echoed = try decode(
+            #"{"access_token": "new", "refresh_token": "old-r", "expires_in": 3600}"#,
+            refreshedWith: "old-r")
+        #expect(echoed.refreshToken == "old-r")
+
+        let rotated = try decode(
+            #"{"access_token": "new", "refresh_token": "new-r", "expires_in": 3600}"#,
+            refreshedWith: "old-r")
+        #expect(rotated.refreshToken == "new-r")
+    }
+
     @Test("An omitted refresh_token_expires_in leaves the deadline unstated")
     func refreshDeadlineOptional() throws {
         let json = #"{"access_token": "new", "expires_in": 3600}"#

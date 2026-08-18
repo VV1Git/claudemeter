@@ -21,7 +21,6 @@ struct SettingsView: View {
         .notifyThresholdPercent
     @AppStorage(Prefs.preferredPollIntervalSeconds) private var preferredPollIntervalSeconds = Prefs
         .Default.preferredPollIntervalSeconds
-
     /// Read optionally: the settings window is a separate scene, and the pane must still render if
     /// the model was not injected into it.
     @Environment(AppModel.self) private var model: AppModel?
@@ -29,6 +28,11 @@ struct SettingsView: View {
     @State private var loginItemStatus = SMAppService.mainApp.status
     @State private var loginItemError: String?
     @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
+    /// Deliberately `@State` and never `@AppStorage`: this is a bearer token, and the only place
+    /// it is written down is the Keychain item the Use button puts it in.
+    @State private var dedicatedToken = ""
+    @State private var tokenError: String?
+    @State private var isAdopting = false
 
     init() {}
 
@@ -37,6 +41,7 @@ struct SettingsView: View {
             menuBarSection
             usageHoursSection
             refreshSection
+            credentialsSection
             alertsSection
             startupSection
             footerSection
@@ -261,6 +266,118 @@ struct SettingsView: View {
         return "\(seconds / 60) min \(seconds % 60) s"
     }
 
+    // MARK: - Credentials
+
+    /// How ClaudeMeter gets a token, and the one thing the user can do to stop macOS asking.
+    ///
+    /// There used to be a switch here offering to let ClaudeMeter renew Claude Code's token. It
+    /// is gone, and not because it was hard to explain: it could not be made safe. Renewing means
+    /// spending the CLI's refresh token, which the endpoint rotates, so the CLI's copy dies the
+    /// moment it is spent — and the only way to hand the replacement over is to write the shared
+    /// Keychain item, which macOS answers by rebuilding that item's list of permitted programs
+    /// around ClaudeMeter alone. Measured on this machine: both the modern and the legacy write
+    /// API collapse the list to the writer. So the switch chose between signing you out of Claude
+    /// Code and locking Claude Code out of its own credential, and neither is a setting.
+    ///
+    /// What is offered instead is a token of ClaudeMeter's own, which sidesteps the whole
+    /// business: it lives in an item this app creates and nothing else writes, so no list is ever
+    /// reset and no dialog is ever raised.
+    private var credentialsSection: some View {
+        Section {
+            if model?.hasDedicatedToken == true {
+                LabeledContent("Token") {
+                    Text(verbatim: "ClaudeMeter\u{2019}s own")
+                        .foregroundStyle(.secondary)
+                }
+                Button("Forget It and Use Claude Code\u{2019}s") {
+                    Task { await model?.forgetDedicatedToken() }
+                }
+                .controlSize(.small)
+                note(
+                    "ClaudeMeter is using its own token, so it never reads Claude Code\u{2019}s "
+                        + "credential and macOS never asks you to authorize anything.")
+            } else {
+                HStack(spacing: 8) {
+                    SecureField("sk-ant-oat01-\u{2026}", text: $dedicatedToken)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Use") { adoptToken() }
+                        .disabled(
+                            dedicatedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || isAdopting)
+                }
+                note(
+                    "Optional, and the only way to stop the Keychain prompts for good. Run "
+                        + "`claude setup-token` in a terminal, then paste the token here. It goes "
+                        + "into ClaudeMeter\u{2019}s own Keychain item \u{2014} Claude Code\u{2019}s is left "
+                        + "untouched, and neither one can evict the other again.")
+            }
+
+            if let tokenError {
+                Text(verbatim: tokenError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if model?.cliLockedOut == true {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(
+                        verbatim: repairCommand == nil
+                            ? "Claude Code is currently locked out of the Keychain item. "
+                                + "ClaudeMeter could not work out the exact command for this "
+                                + "machine \u{2014} run scripts/repair-keychain-partition-list.sh from "
+                                + "the ClaudeMeter source instead."
+                            : "Claude Code is currently locked out of the Keychain item. Copy "
+                                + "the repair command and run it in a terminal. ClaudeMeter no "
+                                + "longer writes that item, so this should not come back."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // Offered only when this build's own identity is known: the command replaces
+                    // the item's list of permitted programs, so one naming the wrong identity
+                    // would lock ClaudeMeter out in the act of letting Claude Code back in.
+                    if let command = repairCommand {
+                        Button("Copy Repair Command") { copyRepairCommand(command) }
+                            .controlSize(.small)
+                    }
+                }
+            }
+        } header: {
+            header("Credentials")
+        }
+    }
+
+    private var repairCommand: String? { model?.partitionRepairCommand }
+
+    private func copyRepairCommand(_ command: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+    }
+
+    /// Spends the pasted token on a real request before accepting it, so a token that does not
+    /// work for this endpoint is reported while the user is still looking at the field.
+    private func adoptToken() {
+        let token = dedicatedToken
+        isAdopting = true
+        tokenError = nil
+        Task {
+            // `model` is optional because this pane must still render when the scene was built
+            // without one. Optional-chaining the call would then evaluate to `nil`, which is also
+            // what success looks like — so the field would clear and the user would believe a
+            // token had been saved that never left this view.
+            guard let model else {
+                isAdopting = false
+                tokenError = "ClaudeMeter is still starting up. Try again in a moment."
+                return
+            }
+            let failure = await model.adoptDedicatedToken(token)
+            isAdopting = false
+            tokenError = failure
+            if failure == nil { dedicatedToken = "" }
+        }
+    }
+
     // MARK: - Startup
 
     private var startupSection: some View {
@@ -319,8 +436,10 @@ struct SettingsView: View {
                     verbatim: "Settings live in this app's user defaults. Poll history, the "
                         + "cached snapshot and the event cache are files in \(Self.supportPath).")
                 Text(
-                    verbatim: "The OAuth token is read from the Keychain on every poll and is "
-                        + "never written, cached, or sent anywhere but api.anthropic.com.")
+                    verbatim: "The OAuth token is never sent anywhere but api.anthropic.com, and "
+                        + "Claude Code's credential is only ever read \u{2014} ClaudeMeter never "
+                        + "writes it. The token is held in memory between polls rather than "
+                        + "re-read each time.")
                 if let factor = model?.inflationFactor, factor > 1.01 {
                     Text(
                         verbatim: "Transcript rows repeat \(Self.factorText(factor)) over; each "

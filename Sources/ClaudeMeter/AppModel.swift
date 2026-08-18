@@ -21,6 +21,20 @@ import UsageCore
     public private(set) var fiveHourProjection: Projection?
     public private(set) var sevenDayProjection: Projection?
     public private(set) var health: DataHealth = .live
+    /// True when the shared Keychain item's partition list no longer admits `apple-tool:`, so
+    /// every `claude` command is about to start raising a password dialog.
+    ///
+    /// This app cannot cause that any more — it never writes the item — so what this reports is
+    /// damage left by a version that did, and it should clear for good once repaired.
+    ///
+    /// Deliberately not a `DataHealth` case. `DataHealth` says whether the numbers on screen are
+    /// live, and during a lockout they generally are: it is the CLI that has lost access, not this
+    /// app. The two states are independent and the panel shows them as two rows.
+    public private(set) var cliLockedOut = false
+    /// The `security` line that puts the evicted identity back, or nil when one cannot be built
+    /// honestly. Held here rather than read from the view, because building it queries the
+    /// Keychain and a SwiftUI body runs on every layout pass.
+    public private(set) var partitionRepairCommand: String?
     public private(set) var sessions: [SessionStat] = []
     public private(set) var daily: [DailyStat] = []
     public private(set) var models: [ModelUsage] = []
@@ -76,15 +90,6 @@ import UsageCore
     /// the limit. (Not additive-increase/multiplicative-decrease, despite the shape of the idea.)
     private static let speedupFactor: Double = 0.8
 
-    /// How much life a token must have left to be used as-is. Wider than the slowest poll
-    /// interval, so every poll finds a token that will still be valid when its request lands
-    /// — the app never has to discover expiry by being refused. Wider still would mean
-    /// refreshing sooner than Claude Code does and rotating tokens out from under it.
-    private static let refreshLeadTime: TimeInterval = 5 * 60
-    /// Attempts at writing a refreshed pair back to the shared Keychain item.
-    private static let credentialWriteAttempts = 3
-    private static let credentialWriteRetryDelay: TimeInterval = 0.1
-
     private static let maximumBackoff: TimeInterval = 300
     /// A `Retry-After` is honoured as sent, but not unboundedly: a header that asks for a day
     /// would otherwise park the app until it is relaunched.
@@ -95,15 +100,15 @@ import UsageCore
     /// Rescan cadence. Passes after the first are incremental — files already at their stored
     /// offset are not reopened — so this costs close to nothing and keeps sessions current.
     private static let rescanInterval: TimeInterval = 5 * 60
-    private static let dailyHistoryDays = 30
-    /// Trailing days behind the hour-of-day profile. Long enough that one unusual night does
-    /// not define the shape, short enough that a change of working hours shows up.
-    private static let hourProfileDays = 30
 
     // MARK: Collaborators
 
     private let client = LimitsClient()
-    private let refresher = TokenRefresher()
+    /// Every Keychain call in the app goes through here, and it is an actor off the main thread.
+    /// That is the whole fix for the panel freezing: securityd round trips — and, when this app
+    /// has been evicted from the item's partition list, a modal authorization dialog — no longer
+    /// happen anywhere the UI can be waiting on them.
+    private let credentials = CredentialStore()
     private let store = SampleStore()
 
     /// Deduplicated transcript events, replaced wholesale by each completed scan. Held on the
@@ -114,6 +119,11 @@ import UsageCore
     private var pollTask: Task<Void, Never>?
     private var pollInFlight: Task<TimeInterval, Never>?
     private var scanTask: Task<Void, Never>?
+    /// The rollup pass, held so a newer request can cancel an older one. Dragging the idle-gap
+    /// slider asks for one per minute crossed and only the last answer is wanted.
+    private var aggregateTask: Task<Void, Never>?
+    /// The same, for the cheaper calibration-only pass a poll triggers.
+    private var calibrationTask: Task<Void, Never>?
     private var consecutiveFailures = 0
     private var offlineSince: Date?
     private var lastScanAt: Date?
@@ -138,7 +148,38 @@ import UsageCore
         hasStarted = true
         loadPersistedState(now: Date())
         startScan()
+        // Off the main actor and not awaited here, so a slow securityd cannot delay the first
+        // panel. The first poll answers the same question a moment later anyway.
+        Task { [weak self] in
+            guard let self else { return }
+            self.hasDedicatedToken = await self.credentials.hasDedicatedToken()
+        }
         pollTask = Task { [weak self] in await self?.runPollLoop(after: 0) }
+    }
+
+    /// Reads the credential with the system's authorization dialog permitted.
+    ///
+    /// The one entry point in the app that may raise that dialog, and it exists so the dialog is
+    /// something the user asked for a moment ago rather than something that appeared over their
+    /// work. Everything else takes a refusal for an answer. Runs on the actor, so even the modal
+    /// wait costs the UI nothing.
+    public func authorizeKeychain() async {
+        do {
+            _ = try await credentials.authorize()
+        } catch let error as KeychainError where error.isAuthorizationProblem {
+            // Dismissed, or denied. Either way it is an answer, and the app does not ask again on
+            // its own initiative — but the state must stay `.needsAuthorization` so the button is
+            // still on screen for a user who dismissed the dialog by accident. Reporting these as
+            // an outage would swap the notice for one carrying no way back, and leave them
+            // waiting out a poll interval to get the button again.
+            setHealth(.needsAuthorization)
+            return
+        } catch {
+            setHealth(.offline(since: lastUpdate ?? Date(), reason: message(for: error)))
+            return
+        }
+        await refreshPartitionState(now: Date(), force: true)
+        await refresh(force: true)
     }
 
     /// Restarts the loop so a new cadence takes effect now instead of after the sleep already in
@@ -259,58 +300,90 @@ import UsageCore
         return nextAttemptNotBefore
     }
 
-    /// Wall-clock hours for a gap the user has not committed yet, so the settings slider can
-    /// show the figure it is about to change without a full aggregate pass on every drag
-    /// increment. Same in-memory events, no rescan.
-    public func usageHoursPreview(gapMinutes: Int) -> UsageHours? {
-        let settled = events.filter { $0.timestamp <= Date() }
-        guard !settled.isEmpty else { return nil }
-        return Aggregates.usageHours(from: settled, gap: TimeInterval(gapMinutes) * 60)
-    }
-
     // MARK: - Aggregates
 
-    /// Recomputed from the in-memory event array, never from disk: changing the active-gap
-    /// slider is a pure function of events the app already holds, so it must not trigger a
-    /// rescan of the whole corpus.
+    /// Recomputes every rollup the panel shows, off the main actor.
+    ///
+    /// Eight passes over the whole corpus, several of which sort it and one of which prices every
+    /// event four times — around four milliseconds at thirty thousand events, and linear in a
+    /// corpus that only grows. It used to run on the main actor on every poll, every scan and
+    /// every increment of the idle-gap slider; now it runs on a background task and the results,
+    /// all value types, are assigned in one hop back. See `Aggregation` for why this is a bound
+    /// rather than a speed-up.
+    ///
+    /// Coalescing rather than queueing: a drag across the slider fires this many times, and only
+    /// the last answer is wanted. An in-flight pass is cancelled, and its result discarded.
     public func recomputeAggregates() {
-        let now = Date()
+        aggregateTask?.cancel()
+        let events = self.events
         let gap = Prefs.Current.activeGap()
-        // `effortSplit`, `usageHours` and `cacheHitRatio` take no `now` and so count every event
-        // handed to them, unlike the three above. A transcript written by a machine whose clock
-        // runs fast would stretch wall clock and agent hours without bound, so the clamp the
-        // others apply internally is applied here once, on behalf of all of them.
-        let settled = events.filter { $0.timestamp <= now }
-        sessions = Aggregates.sessions(from: settled, idleGap: gap, now: now)
-        daily = Aggregates.daily(
-            from: settled, days: Self.dailyHistoryDays, calendar: .current, now: now)
-        models = Aggregates.modelSplit(from: settled, now: now)
-        efforts = Aggregates.effortSplit(from: settled)
-        usageHours = settled.isEmpty ? nil : Aggregates.usageHours(from: settled, gap: gap)
-        cacheHitRatio = Aggregates.cacheHitRatio(from: settled)
-        sidechainShare = Aggregates.sidechainShare(from: settled)
-        hourProfile = Aggregates.hourProfile(
-            events: settled, days: Self.hourProfileDays, now: now, calendar: .current)
-        eventCount = settled.count
-        recomputeCalibration(now: now)
+        // The stored handle *is* the detached task, so cancelling it actually marks it cancelled.
+        // Wrapping a detached task inside another and cancelling the wrapper does not: detached
+        // work does not inherit cancellation, and awaiting a non-throwing task does not resume
+        // early — the pass would run to completion regardless and only its result be discarded.
+        aggregateTask = Task.detached(priority: .userInitiated) { [weak self] in
+            // Debounced, because the corpus walk is synchronous and so cannot be interrupted
+            // partway: once it starts, cancelling costs a whole pass. Sleeping first means a
+            // superseding call cancels this one while it is still cheap to cancel, which is what
+            // turns a drag across the idle-gap slider into one computation instead of one per
+            // minute crossed.
+            do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
+            guard !Task.isCancelled else { return }
+            let computed = Aggregation.compute(events: events, gap: gap, now: Date())
+            guard !Task.isCancelled else { return }
+            await self?.apply(computed)
+        }
+        // The calibration figures move with the events too, but they have their own single
+        // producer — see `recomputeCalibration` — so they are asked for rather than computed here.
+        recomputeCalibration()
     }
 
-    /// The two figures that need both data sources at once — the poll series for what the
-    /// limits did, the transcripts for what was spent while they did it.
+    private func applyCalibration(_ computed: CalibrationOutcome) {
+        fiveHourCalibration = computed.fiveHour
+        sevenDayCalibration = computed.sevenDay
+        cyclePace = computed.cyclePace
+    }
+
+    private func apply(_ computed: Aggregation) {
+        sessions = computed.sessions
+        daily = computed.daily
+        models = computed.models
+        efforts = computed.efforts
+        usageHours = computed.usageHours
+        cacheHitRatio = computed.cacheHitRatio
+        sidechainShare = computed.sidechainShare
+        hourProfile = computed.hourProfile
+        eventCount = computed.eventCount
+    }
+
+    /// Just the exchange rates and cycle pace, which is all a new poll sample can have changed.
     ///
-    /// Recomputed from whichever of the two most recently changed, so a scan that lands between
-    /// polls updates the exchange rate rather than waiting for the next reading.
-    private func recomputeCalibration(now: Date) {
-        let settled = events.filter { $0.timestamp <= now }
-        fiveHourCalibration = ProjectionEngine.calibrate(
-            kind: .fiveHour, samples: samples, events: settled, now: now)
-        sevenDayCalibration = ProjectionEngine.calibrate(
-            kind: .sevenDay, samples: samples, events: settled, now: now)
-        cyclePace = sevenDayResetsAt.flatMap {
-            Aggregates.cyclePace(events: settled, kind: .sevenDay, resetsAt: $0, now: now)
+    /// Off the main actor for the same reason as the full pass — it still walks the corpus twice
+    /// — but kept separate from it so a poll every three minutes does not pay for nine passes to
+    /// refresh three numbers.
+    private func recomputeCalibration() {
+        calibrationTask?.cancel()
+        let events = self.events
+        let samples = self.samples
+        let resetsAt = sevenDayResetsAt
+        // Detached and stored directly, for the reason given in `recomputeAggregates`.
+        calibrationTask = Task.detached(priority: .utility) { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
+            guard !Task.isCancelled else { return }
+            let computed = CalibrationOutcome.compute(
+                events: events, samples: samples, sevenDayResetsAt: resetsAt, now: Date())
+            guard !Task.isCancelled else { return }
+            await self?.applyCalibration(computed)
         }
     }
 
+    /// The projections alone, which are cheap enough to keep synchronous.
+    ///
+    /// `ProjectionEngine.project` fits a burn rate over the trailing sample series and reads the
+    /// events only for a variation estimate, so it is a different order of work from the rollups
+    /// above and a poll can afford it inline. The calibration it used to drag along with it — two
+    /// full passes over the corpus — has moved to `recomputeAggregates`, which is why a poll now
+    /// schedules that rather than doing the work itself.
     private func recomputeProjections(now: Date) {
         guard let snapshot else {
             fiveHourProjection = nil
@@ -321,7 +394,6 @@ import UsageCore
             kind: .fiveHour, snapshot: snapshot, samples: samples, events: events, now: now)
         sevenDayProjection = ProjectionEngine.project(
             kind: .sevenDay, snapshot: snapshot, samples: samples, events: events, now: now)
-        recomputeCalibration(now: now)
     }
 
     // MARK: - Persisted state
@@ -403,71 +475,105 @@ import UsageCore
 
     /// One read of the usage endpoint. Returns how long to wait before the next one.
     private func pollOnce(now: Date) async -> TimeInterval {
-        // Re-read every poll rather than caching the token: Claude Code refreshes it on its own
-        // schedule, and this app must pick that up without being relaunched.
-        let stored: ClaudeCredentials
+        // Throttled inside the store, because the list only changes when somebody writes the
+        // item. This app no longer does, so what is being watched for here is damage an earlier
+        // build left behind, and the moment the user's repair clears it.
+        await refreshPartitionState(now: now)
+
+        let resolved: ResolvedCredential
         do {
-            stored = try Keychain.readCredentials()
+            resolved = try await credentials.current(now: now)
         } catch KeychainError.notFound {
             return settle(.noCredentials)
+        } catch let error as KeychainError where error.isAuthorizationProblem {
+            // Evicted from the item's partition list, with nothing cached that is still good.
+            // Not a failure to back off from — no request was made, and no amount of waiting
+            // fixes it. The panel offers the user the one gesture that does.
+            return settle(.needsAuthorization)
         } catch {
             return fail(reason: message(for: error), now: now)
         }
 
-        // Renew before the request rather than after a 401: the point is that a token close to
-        // its deadline never gets used, so the app is not periodically down for the minutes
-        // between expiry and whenever Claude Code next runs.
-        let credentials: ClaudeCredentials
-        switch await freshened(stored, now: now) {
-        case .usable(let renewed):
-            credentials = renewed
+        let usable: ResolvedCredential
+        switch CredentialPolicy.decide(
+            resolved, now: now, lead: CredentialStore.refreshLeadTime)
+        {
+        case .useStored:
+            usable = resolved
+        case .renew:
+            switch await renewedDedicated(now: now) {
+            case .renewed(let credential):
+                usable = credential
+            case .signInRequired:
+                return settle(.staleCredentials)
+            case .unavailable(let reason):
+                // The renewal failed for a reason that may not last — no network, a 500. If the
+                // token still has life in it the request is worth making anyway.
+                guard !resolved.credentials.isExpired(asOf: now) else {
+                    return fail(reason: reason, now: now)
+                }
+                usable = resolved
+            }
+        case .waitForClaudeCode:
+            // Not a failure, so it does not walk the backoff ladder: the token is simply old and
+            // the process that owns it has not renewed it yet. Keeping the normal cadence is what
+            // picks the new token up within one poll of `claude` running.
+            return settle(.waitingForClaudeCode)
         case .signInRequired:
             return settle(.staleCredentials)
-        case .unavailable(let reason):
-            // The refresh failed for a reason that may not last — no network, a 500. If the
-            // token still has life in it the request is worth making anyway; if it does not,
-            // there is nothing to make it with, so back off and try the refresh again.
-            guard !stored.isExpired(asOf: now) else { return fail(reason: reason, now: now) }
-            credentials = stored
         }
 
         do {
-            let fresh = try await client.fetch(accessToken: credentials.accessToken, now: now)
+            let fresh = try await client.fetch(
+                accessToken: usable.credentials.accessToken, now: now)
             apply(fresh, now: now)
             noteCleanPoll()
             return pollInterval
         } catch let error as LimitsClientError {
             switch error {
             case .unauthorized:
-                // Re-read instead of trusting the copy from the top of this poll: the token may
-                // have rotated mid-request.
+                // A token the server rejects is spent whatever its stored deadline claims, so
+                // drop the cached copy and re-read: the deadline can be wrong, and the 401 is
+                // the authority on that.
+                await credentials.invalidate()
                 do {
-                    let latest = try Keychain.readCredentials()
-                    // A token the server rejects is spent whatever its stored deadline claims,
-                    // so force a renewal rather than gating on `isExpired` — the deadline can
-                    // be wrong, and the 401 is the authority on that.
-                    if latest.accessToken != credentials.accessToken {
+                    let latest = try await credentials.current(now: Date())
+                    if latest.credentials.accessToken != usable.credentials.accessToken {
                         // Rotated mid-request, by Claude Code or by another instance of this
                         // app. The stored token is newer than the one that was refused, so
-                        // spend the retry on it rather than a refresh.
-                        return await retryAfterRenewal(with: latest, now: now)
+                        // spend the retry on it rather than a renewal.
+                        return await retryAfterRenewal(with: latest.credentials, now: now)
                     }
-                    switch await renew(latest, now: Date()) {
-                    case .usable(let renewed):
-                        return await retryAfterRenewal(with: renewed, now: now)
+                    switch CredentialPolicy.decideAfterRejection(latest, now: Date()) {
+                    case .renew:
+                        switch await renewedDedicated(now: Date()) {
+                        case .renewed(let credential):
+                            return await retryAfterRenewal(with: credential.credentials, now: now)
+                        case .signInRequired:
+                            return settleAfterRefusal(.staleCredentials, now: now)
+                        case .unavailable:
+                            return fail(reason: error.description, now: now)
+                        }
+                    case .waitForClaudeCode, .useStored:
+                        // The server refused a token whose stored deadline may still be in the
+                        // future — revoked, or signed out on another machine. Nothing this app
+                        // does fixes it, so the ladder runs: without it the same rejected request
+                        // would go out every cadence, and again on every panel open.
+                        return settleAfterRefusal(.waitingForClaudeCode, now: now)
                     case .signInRequired:
-                        return settle(.staleCredentials)
-                    case .unavailable:
-                        return fail(reason: error.description, now: now)
+                        return settleAfterRefusal(.staleCredentials, now: now)
                     }
                 } catch KeychainError.notFound {
                     // Signed out between the request and now — not an expired token, and the
-                    // instruction the user needs is "sign in", not "renew".
+                    // instruction the user needs is "sign in", not "renew". No further request is
+                    // going to be made against a credential that is gone, so this one settles.
                     return settle(.noCredentials)
+                } catch let error as KeychainError where error.isAuthorizationProblem {
+                    return settle(.needsAuthorization)
                 } catch {
                     // The item is there but will not answer. `DataHealth` has no case for that,
                     // and re-authenticating is the right instruction either way.
-                    return settle(.staleCredentials)
+                    return settleAfterRefusal(.staleCredentials, now: now)
                 }
 
             case .rateLimited(let retryAfter):
@@ -496,89 +602,35 @@ import UsageCore
 
     /// What a renewal attempt left the app holding.
     private enum CredentialRenewal {
-        /// Good for a request now — either freshly minted, or the stored pair when it had
-        /// enough life left to leave alone.
-        case usable(ClaudeCredentials)
-        /// The refresh token is gone, expired, or refused. Only a new sign-in helps.
+        /// Good for a request now.
+        case renewed(ResolvedCredential)
+        /// The refresh token is gone, expired, or refused. Only a new credential helps.
         case signInRequired
         /// The refresh could not be completed for a reason that may not last.
         case unavailable(String)
     }
 
-    /// Renews only when the token is at or near its deadline; otherwise hands back what was
-    /// stored. A refresh token is not free to spend — each one may be rotated away — so this
-    /// is deliberately not "refresh every poll".
-    private func freshened(
-        _ credentials: ClaudeCredentials, now: Date
-    ) async -> CredentialRenewal {
-        guard credentials.expiresSoon(asOf: now, lead: Self.refreshLeadTime) else {
-            return .usable(credentials)
-        }
-        return await renew(credentials, now: now)
-    }
-
-    /// Trades the refresh token for a new pair and writes it back to the shared Keychain item.
+    /// Renews the credential the user dedicated to this app.
     ///
-    /// The write is conditional on the stored refresh token still being the one spent here. If
-    /// Claude Code refreshed first, its pair is the live one and this refresh is dropped — the
-    /// last writer does not win, the first one does, which is what keeps two processes off each
-    /// other's tokens.
-    private func renew(_ credentials: ClaudeCredentials, now: Date) async -> CredentialRenewal {
-        guard let spent = credentials.usableRefreshToken(asOf: now) else { return .signInRequired }
-
-        let tokens: RefreshedTokens
+    /// Only ever reached for a `.dedicated` credential — `CredentialPolicy` returns `.renew` for
+    /// nothing else — and that restriction is the point. Renewing here spends this app's own
+    /// refresh token and writes this app's own Keychain item, so no other process loses a token
+    /// and no other identity is evicted from a partition list. The same operation on Claude
+    /// Code's credential would do both, which is why it is not available at all.
+    private func renewedDedicated(now: Date) async -> CredentialRenewal {
         do {
-            tokens = try await refresher.refresh(credentials, now: now)
+            guard let renewed = try await credentials.renewDedicated(now: now) else {
+                // Nothing to renew with. The caller decides whether what it holds still serves.
+                return .signInRequired
+            }
+            return .renewed(renewed)
         } catch let error as TokenRefreshError {
             return error.requiresSignIn ? .signInRequired : .unavailable(error.description)
         } catch {
             return .unavailable(message(for: error))
         }
-
-        let renewed = credentials.applying(tokens)
-        do {
-            if try storeWithRetries(tokens, replacing: spent) {
-                return .usable(renewed)
-            }
-            // Lost the race. Whatever is stored now was written by a process that refreshed
-            // more recently, so it is the pair to use.
-            return .usable(try Keychain.readCredentials())
-        } catch KeychainError.notFound {
-            return .signInRequired
-        } catch {
-            // Refreshed but could not persist. The new token still works for this app's own
-            // requests, so it is used rather than thrown away — but Claude Code will not see
-            // it, and if the server rotated the refresh token the CLI's stored copy is now
-            // the stale one. Nothing here can undo that, which is why a refresh is only ever
-            // spent close to expiry, when the CLI was about to make the same trade anyway.
-            return .usable(renewed)
-        }
     }
 
-    /// The Keychain can refuse a write transiently — another process holding the item, a
-    /// prompt being dismissed. Claude Code retries its own credential writes for the same
-    /// reason; a lost write here means the CLI keeps a refresh token the server may have
-    /// rotated away, so it is worth more than one attempt.
-    private func storeWithRetries(
-        _ tokens: RefreshedTokens, replacing spent: String
-    ) throws -> Bool {
-        var lastError: Error?
-        for attempt in 0..<Self.credentialWriteAttempts {
-            do {
-                return try Keychain.storeRefreshedTokens(tokens, replacing: spent)
-            } catch KeychainError.notFound {
-                throw KeychainError.notFound
-            } catch {
-                lastError = error
-                if attempt + 1 < Self.credentialWriteAttempts {
-                    // Short and blocking on purpose: this runs between a successful refresh
-                    // and the poll that uses it, and the whole point is to land the write.
-                    Thread.sleep(forTimeInterval: Self.credentialWriteRetryDelay)
-                }
-            }
-        }
-        throw lastError ?? KeychainError.unhandled(errSecIO)
-    }
 
     /// One more read of the usage endpoint after a renewal, so a poll that started on a token
     /// the server had already retired still returns fresh numbers instead of an outage.
@@ -594,8 +646,9 @@ import UsageCore
             switch error {
             case .unauthorized:
                 // A token minted seconds ago and refused anyway. Another renewal would be
-                // refused too, so stop and ask for a sign-in rather than loop.
-                return settle(.staleCredentials)
+                // refused too, so stop and ask for a sign-in rather than loop — and hold the
+                // gate, because this poll has now spent two refused requests.
+                return settleAfterRefusal(.staleCredentials, now: now)
             case .rateLimited:
                 slowDown()
                 let backoff = fail(reason: error.description, now: now)
@@ -621,6 +674,7 @@ import UsageCore
         try? store.cacheSnapshot(fresh)
         appendSample(Sample(snapshot: fresh))
         recomputeProjections(now: now)
+        recomputeCalibration()
 
         // Alerts are evaluated only here, not after a scan: a transcript pass changes the token
         // aggregates but never the utilization an alert is about. `Notifier` no-ops unless the
@@ -639,6 +693,26 @@ import UsageCore
         nextAttemptNotBefore = nil
         setHealth(state)
         return pollInterval
+    }
+
+    /// A credential state arrived at *after* a request was made and refused.
+    ///
+    /// `settle` is wrong for these, and the difference is not cosmetic. It clears
+    /// `nextAttemptNotBefore` on the grounds that no request was made and there is nothing to back
+    /// off from — true when a stale deadline is spotted before asking, false here. A token the
+    /// server rejects while its stored deadline is still in the future (revoked, or signed out on
+    /// another machine) would otherwise be re-sent every cadence for ever, and, because the panel
+    /// gate reads the same cleared field, on every panel open as well.
+    ///
+    /// So the health is the one the user needs and the backoff ladder still runs. `offlineSince`
+    /// is deliberately left alone: these are not outages, and the panel must not start reporting
+    /// how long the numbers have been stale for a credential problem.
+    private func settleAfterRefusal(_ state: DataHealth, now: Date) -> TimeInterval {
+        consecutiveFailures += 1
+        setHealth(state)
+        let delay = backoffDelay()
+        nextAttemptNotBefore = now.addingTimeInterval(delay)
+        return delay
     }
 
     private func fail(reason: String, now: Date) -> TimeInterval {
@@ -729,6 +803,75 @@ import UsageCore
     private func setHealth(_ new: DataHealth) {
         guard health != new else { return }
         health = new
+    }
+
+    /// Records whether Claude Code can still reach its own credential item.
+    ///
+    /// This app cannot cause a lockout any more — it never writes that item — so what this
+    /// watches for is damage an earlier build left behind, and the moment the user's repair
+    /// clears it. Reading an ACL needs no authorization and decrypts nothing, and the store
+    /// throttles it besides, so a poll pays almost nothing for the check.
+    ///
+    /// Both fields are compared before assigning: `@Observable` notifies on every write, and an
+    /// unchanged answer every few minutes would re-render the panel for nothing.
+    private func refreshPartitionState(now: Date, force: Bool = false) async {
+        let state = await credentials.partitionState(now: now, force: force)
+        if cliLockedOut != state.cliLockedOut { cliLockedOut = state.cliLockedOut }
+        if partitionRepairCommand != state.repairCommand {
+            partitionRepairCommand = state.repairCommand
+        }
+    }
+
+    // MARK: - The dedicated token
+
+    /// True when the user has given ClaudeMeter a token of its own, so the panel can say which
+    /// credential the numbers came from.
+    public private(set) var hasDedicatedToken = false
+
+    /// Adopts a token from `claude setup-token` and immediately spends it on a real request, so
+    /// a token that does not work for this endpoint is reported now rather than at the next poll.
+    ///
+    /// Returns the error to show, or nil on success. Nothing here reads or writes Claude Code's
+    /// credential item.
+    public func adoptDedicatedToken(_ token: String) async -> String? {
+        // The stored credential, not the argument: the store trims what it saves, and validating
+        // the untrimmed string would spend a different token from the one on disk — which a
+        // terminal copy, newline and all, makes the common case rather than the odd one. The
+        // request would 401 and the branch below would then delete a token that was fine.
+        let stored: ResolvedCredential
+        do {
+            stored = try await credentials.adoptDedicatedToken(token)
+        } catch {
+            return message(for: error)
+        }
+        hasDedicatedToken = await credentials.hasDedicatedToken()
+        do {
+            let fresh = try await client.fetch(
+                accessToken: stored.credentials.accessToken, now: Date())
+            apply(fresh, now: Date())
+            noteCleanPoll()
+            return nil
+        } catch let error as LimitsClientError {
+            // Kept rather than discarded on a refusal: the token may be fine and the network may
+            // not be. Only an outright rejection is worth undoing, since that one is about the
+            // token itself and leaving it in place would break every later poll.
+            if case .unauthorized = error {
+                await credentials.forgetDedicatedToken()
+                hasDedicatedToken = await credentials.hasDedicatedToken()
+                return "The endpoint refused that token. Check you pasted all of it, and that it "
+                    + "came from `claude setup-token`."
+            }
+            return error.description
+        } catch {
+            return message(for: error)
+        }
+    }
+
+    /// Forgets the dedicated token and goes back to reading Claude Code's credential.
+    public func forgetDedicatedToken() async {
+        await credentials.forgetDedicatedToken()
+        hasDedicatedToken = await credentials.hasDedicatedToken()
+        await refresh(force: true)
     }
 
     /// Human-readable `reason` for `DataHealth.offline`. `LimitsClientError` carries its own

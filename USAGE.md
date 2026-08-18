@@ -306,6 +306,7 @@ defaults; nothing here is sent anywhere.
 | Menu bar | Format | Which of the four menu bar formats is drawn. |
 | Usage hours | Idle gap (5–30 min) | The pause that ends an active stretch. Drives the sessions list, the `Sessions` tile, and `Wall clock`. Does not affect agent hours. |
 | Refresh | Check limits every (90 s, 2, 3, 5, 10, 15 min) | The cadence to aim for. A rate limit can still widen it; a second row appears showing the effective one when it has. |
+| Credentials | Token | Paste a token from `claude setup-token` to give ClaudeMeter its own credential, or forget one already set. Optional. |
 | Alerts | Notify me when a limit is running out | Master switch for notifications. Off by default. |
 | Alerts | Alert at N% of a window (50–99, steps of 5) | Threshold crossing that triggers an alert. |
 | Startup | Launch ClaudeMeter at login | Registers or unregisters the app as a login item. |
@@ -325,6 +326,33 @@ What it cannot do is overrule the endpoint: a 429 still widens the interval past
 app works back down to it. Whenever the two differ, a `Currently` row shows what the app is actually
 polling at and the text below says why. See the section on the cadence for the rest.
 
+**ClaudeMeter never writes Claude Code's credential, and never renews it.** There used to be a
+setting offering to, and it was removed rather than defaulted off, because neither of its two
+outcomes was acceptable. macOS keeps a list on each Keychain item of the programs allowed to read
+it without a password, and writing an item's data rebuilds that list around whoever wrote it —
+measured here against a throwaway item seeded with three identities, both the modern and the legacy
+write API collapsed it to the writer alone, so there is no way to write and leave the list intact.
+Renewing also means spending Claude Code's refresh token, which the endpoint rotates: the CLI's
+stored copy stops working the moment ClaudeMeter spends it. So saving the renewal locks `claude`
+out of its own credential, and not saving it signs `claude` out altogether. Declining to renew is
+the only branch that does neither.
+
+The cost is that when the access token ages out, the panel shows `Waiting for Claude Code` until
+you next run any `claude` command — which also happens to be the only time your usage is changing.
+Everything drawn from your transcripts carries on regardless.
+
+**A token of ClaudeMeter's own is the way to avoid Keychain prompts entirely.** The one thing the
+read-only arrangement cannot dodge is the reverse eviction: when `claude` renews, *it* writes the
+item, and that drops ClaudeMeter off the permitted list. ClaudeMeter never raises the resulting
+dialog on its own — the read is made with system dialogs suppressed, so it fails cleanly and the
+panel shows `Keychain access needed` with an *Authorize…* button you press when it suits you.
+
+To stop even that, run `claude setup-token` and paste the token into Settings ▸ Credentials.
+It goes into a Keychain item ClaudeMeter creates and is the sole writer of, so nothing ever resets
+its permitted list, no dialog can arise, and Claude Code's own credential is never read at all.
+The token is checked against the usage endpoint before it is accepted, so a wrong paste is
+reported straight away.
+
 **Alerts request permission only when you switch the toggle on.** That is the app's only
 authorisation request, so a default install never raises a system permission prompt. If the request
 is refused, the toggle switches straight back off and an explanation with an `Open Notification
@@ -339,8 +367,10 @@ of `.build` looks like to it. The app does not test for a bundle itself; it show
 reports. A registration that fails for any other reason surfaces the system's own error text instead.
 
 The footer of the settings window states where state lives and repeats the credential guarantee: the
-OAuth token is read from the Keychain on every poll and is never written, cached, or sent anywhere
-but `api.anthropic.com`. When the transcripts contain duplicate rows — they normally do — a line
+OAuth token is never sent anywhere but `api.anthropic.com`, and Claude Code's credential item is
+only ever read, never written. The token is held in memory between polls rather than re-read each
+time, and the app notices Claude Code renewing by checking the item's modification date — an
+attributes-only read that decrypts nothing and can raise no dialog. When the transcripts contain duplicate rows — they normally do — a line
 reports how many times the average request was written, which is there to explain why ClaudeMeter's
 token totals are lower than a naive sum over the same files. Duplicate assistant rows are common in
 the transcripts, and adding them up over-counts tokens substantially, so the scanner keys rows on
@@ -397,6 +427,8 @@ The panel shows a notice at the top and adjusts what it trusts. There are four s
 | Offline | `Offline since 3:20 PM` (or `Can't reach the usage API`) | The last poll failed. The reason and the time of the next attempt are in the notice. |
 | Sign in again | `Sign in again` | Credentials are present but beyond renewal — the refresh token has expired, been revoked, or was never there. |
 | Not signed in | `Not signed in` | No usable Claude Code credentials in the Keychain. |
+| Waiting for Claude Code | `Waiting for Claude Code` | The stored token has aged out. ClaudeMeter never renews Claude Code's token, because spending it retires the CLI's copy and saving the result locks the CLI out. Run any `claude` command, or give ClaudeMeter a token of its own. |
+| Keychain access needed | `Keychain access needed` | Claude Code rewrote its credential, which reset the item's list of permitted programs. Press *Authorize…*, or set up a dedicated token so it stops happening. |
 
 While offline:
 
@@ -421,8 +453,10 @@ While offline:
 The credential states are handled differently from a transport failure, because no request was made.
 There is nothing to back off from, so the app keeps its normal cadence and stays open to a
 panel-open refresh — which is how a token Claude Code has just rotated gets picked up immediately.
-A token near its deadline is renewed before the request rather than after a rejection, so expiry on
-its own is not a state you see.
+The Keychain item is not re-read on every poll: the credential is held in memory and reused until
+it either nears its deadline or the item's modification date changes, and that date comes from an
+attributes-only read that decrypts nothing and cannot raise a dialog. So a rotation is still
+noticed within one poll, without a decrypting read per poll to notice it with.
 
 ## The refresh cadence, and what setting it actually does
 
@@ -463,19 +497,44 @@ almost nothing.
 
 ## Troubleshooting
 
-**A Keychain prompt on first launch, and again after a rebuild.** ClaudeMeter reads the same
-`Claude Code-credentials` Keychain item Claude Code writes, and macOS asks once for access. Choose
-*Always Allow*. The build is ad-hoc signed, and an ad-hoc signature changes on every rebuild, so the
-system can treat a freshly built copy as a different application and ask again. Signing with a
-stable self-signed certificate avoids the repeat if it becomes tiresome.
+**A Keychain prompt on first launch.** ClaudeMeter reads the same `Claude Code-credentials` item
+Claude Code writes, and macOS asks once for access. Choose *Always Allow*. If it asks again on every
+launch, the build is ad-hoc signed: an ad-hoc signature changes on every rebuild, so the system sees
+a different application each time and the approval never sticks. Rebuild with a stable identity —
+`make app SIGN_ID="Apple Development: you@example.com (TEAMID)"` — which is why `make app` now stops
+rather than signing ad hoc by default.
 
-**`Sign in again`.** ClaudeMeter renews Claude Code's access token on its own, using the stored
-refresh token, whenever the one it finds is within five minutes of expiring — so an expired access
-token is not something you should ever have to act on. This notice means the *refresh* token is the
-problem: it has passed its own deadline (they last a few weeks), the server has revoked it, or the
-credentials never had one, which is the shape `claude setup-token` writes. None of those can be
-fixed from this side. Run `claude` and sign in; ClaudeMeter re-reads the Keychain on every poll, so
-the notice clears within a cadence, and opening the panel picks it up sooner.
+**A password dialog on every `claude` command, naming `security` rather than ClaudeMeter.** Writing
+a Keychain item's data rebuilds the item's list of permitted programs around whoever wrote it, and
+the CLI gets dropped off it. Versions of ClaudeMeter that saved a renewed token did this; this one
+never writes that item, so it cannot recur — but a machine carrying the damage still needs it
+undone once. The panel shows `Claude Code is locked out of the Keychain` with a button that copies
+the repair; `scripts/repair-keychain-partition-list.sh` is the same repair with a confirmation
+step, and it adds the missing programs to the list rather than replacing it. Run it from a
+terminal, where `security` asks for your login password itself — the dialogs the CLI raises are
+torn down after two seconds, which is why *Always Allow* never manages to settle them.
+
+**`Keychain access needed`.** The mirror image of the above, and the one that is expected to happen
+from time to time: `claude` renewed its token, which rewrote the item and dropped *ClaudeMeter* off
+the permitted list. Nothing is broken and nothing needs repairing. Press *Authorize…* in the panel
+and approve once. ClaudeMeter deliberately does not raise that dialog by itself — its reads are
+made with system dialogs suppressed, so a refusal comes back as a value instead of as a modal
+window over whatever you were doing. To stop it recurring at all, give ClaudeMeter a token of its
+own from `claude setup-token` in Settings ▸ Credentials.
+
+**`Waiting for Claude Code`.** The stored access token has aged out and ClaudeMeter is deliberately
+leaving it alone. Renewing it would spend Claude Code's refresh token, which the endpoint rotates,
+retiring the copy the CLI is holding — and the only way to hand the replacement over is to write
+the shared item, which locks the CLI out of it. Run any `claude` command and it renews within a few
+minutes. Nothing is wrong with your credentials, and every statistic drawn from the transcripts is
+still live.
+
+**`Sign in again`.** The *refresh* token is the problem: it has passed its own deadline (they last a
+few weeks), the server has revoked it, or the credentials never had one, which is the shape
+`claude setup-token` writes. None of those can be fixed from this side. Run `claude` and sign in;
+the notice clears within a cadence, and opening the panel picks it up sooner. If you gave
+ClaudeMeter a token of its own, this notice names that token instead and the fix is to run
+`claude setup-token` again and paste the new one into Settings.
 
 **`Not signed in`.** No usable credential item exists. Sign in to Claude Code; the app picks the
 credentials up on its next poll.

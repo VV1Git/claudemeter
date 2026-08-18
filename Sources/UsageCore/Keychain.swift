@@ -78,7 +78,18 @@ public enum KeychainError: Error, Sendable, Equatable {
     case notFound
     /// The item exists but its payload isn't the credential JSON this app understands.
     case malformed(String)
-    /// Any other `SecItemCopyMatching` result, including the user denying access.
+    /// The item is there and this app is not currently allowed to decrypt it: the partition list
+    /// no longer admits this build, and answering would mean a login-password dialog.
+    ///
+    /// Its own case rather than an `.unhandled` status because it is the one failure the user can
+    /// clear, and the only correct response is to offer them the choice — never to raise the
+    /// dialog behind their back. See `readCredentials(interactive:)`.
+    case accessDenied
+    /// The user dismissed the authorization dialog they were shown. Distinct from `.accessDenied`,
+    /// which is what happens when no dialog was permitted in the first place: a refusal is an
+    /// answer, and re-asking immediately would be badgering.
+    case authorizationCancelled
+    /// Any other `SecItemCopyMatching` result.
     case unhandled(OSStatus)
 }
 
@@ -89,9 +100,24 @@ extension KeychainError: LocalizedError {
             return "No Claude Code credentials found in the Keychain."
         case .malformed(let detail):
             return "Claude Code credentials could not be read: \(detail)"
+        case .accessDenied:
+            return "ClaudeMeter is not currently allowed to read Claude Code's credentials."
+        case .authorizationCancelled:
+            return "Keychain authorization was cancelled."
         case .unhandled(let status):
             let message = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
             return "Keychain access failed: \(message)"
+        }
+    }
+
+    /// Whether re-reading might succeed once the user has authorized it. `AppModel` uses this to
+    /// decide between offering an Authorize button and reporting a fault.
+    public var isAuthorizationProblem: Bool {
+        switch self {
+        case .accessDenied, .authorizationCancelled:
+            return true
+        case .notFound, .malformed, .unhandled:
+            return false
         }
     }
 }
@@ -100,32 +126,183 @@ extension KeychainError: LocalizedError {
 
 /// Access to the credential item Claude Code stores.
 ///
-/// The item is shared with the CLI, so the only write this app makes is the narrow one
-/// in `storeRefreshedTokens`: a compare-and-swap that replaces the rotated OAuth fields
-/// and nothing else, and refuses the write outright if the CLI rotated the token first.
-/// That is the same discipline Claude Code applies to its own writes, which is what lets
-/// the two processes refresh without either clobbering the other.
+/// **This app never writes this item.** That is a design rule, not a default, and it is the
+/// single thing keeping ClaudeMeter from breaking the CLI it reads from.
+///
+/// Two facts force it. Changing an item's data makes securityd build the item a fresh storage
+/// group, and a fresh group carries a partition list holding exactly one identity — the
+/// writer's. Every other identity is evicted. Measured on macOS 15 against a throwaway item
+/// seeded with three identities, both `SecItemUpdate` and the legacy
+/// `SecKeychainItemModifyContent` collapsed the list to the writer alone, so there is no API
+/// that writes and leaves the list intact. And renewing a token means spending Claude Code's
+/// refresh token, which the endpoint rotates: the CLI's stored copy dies the instant this app
+/// spends it, so a renewal this app cannot persist signs the user out of Claude Code.
+///
+/// Writing would therefore lock the CLI out of its own credential, and not writing after a
+/// renewal would sign it out. Declining to renew at all is the only branch that does neither,
+/// so this type reads and nothing more. Reads leave the partition list untouched.
+///
+/// What the app *may* own is a credential of its own — `ownService`, an item this app creates
+/// and is the only writer of. Nothing evicts anybody there, because nobody else touches it.
+///
+/// `partitionIdentities()` reports what the shared item's list holds, so the panel can tell the
+/// user when a write from some *earlier* build of this app left the CLI locked out.
 public enum Keychain {
     public static let service = "Claude Code-credentials"
 
-    /// Reads and parses the credential item.
-    public static func readCredentials() throws -> ClaudeCredentials {
-        try parseCredentials(from: readPayload())
+    /// ClaudeMeter's own credential item, for a token the user has dedicated to this app (see
+    /// `claude setup-token`). Created and written by this app alone, so its partition list holds
+    /// this app's identity from birth and no other process ever resets it — which is why the
+    /// dedicated-token path raises no dialogs at all.
+    public static let ownService = "com.claudemeter.ClaudeMeter-credentials"
+    public static let ownAccount = "claudemeter"
+
+    /// The partition identity the Claude Code CLI reads under. It goes through
+    /// `/usr/bin/security`, an Apple-signed tool, so securityd files it under the tool
+    /// identity rather than a team.
+    public static let cliPartitionIdentity = "apple-tool:"
+
+    /// The partition identity this app reads under, derived from the signature of the code that
+    /// is actually running, or `nil` when that signature cannot be read.
+    ///
+    /// Deliberately not a constant. The identity depends on how the copy in front of the user was
+    /// built: a Developer ID or Apple Development signature is filed under its team, an ad-hoc
+    /// signature under the code directory hash of that one build, and an unsigned build under
+    /// `unsigned:`. Hard-coding this project's team would hand every other build a repair command
+    /// that *replaces* the partition list with an identity it does not have — locking the running
+    /// app out of the item in the act of unlocking the CLI. `nil` is why the repair command is
+    /// optional: no command at all is better than a wrong one.
+    ///
+    /// Resolved once. A process cannot change its own signature while it runs, and the panel row
+    /// that shows the repair re-evaluates on every layout pass.
+    public static let appPartitionIdentity: String? = resolveAppPartitionIdentity()
+
+    private static func resolveAppPartitionIdentity() -> String? {
+        var code: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else { return nil }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, SecCSFlags(), &staticCode) == errSecSuccess,
+            let staticCode
+        else { return nil }
+
+        var information: CFDictionary?
+        let status = SecCodeCopySigningInformation(
+            staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information)
+        if status == errSecCSUnsigned { return unsignedPartitionIdentity }
+        guard status == errSecSuccess, let information = information as? [String: Any] else {
+            return nil
+        }
+
+        if let team = information[kSecCodeInfoTeamIdentifier as String] as? String, !team.isEmpty {
+            return "teamid:\(team)"
+        }
+        // No team means an ad-hoc signature, which leaves the code directory hash as the only
+        // identifier the build has — and a different one after every rebuild. The value is the
+        // truncated hash `codesign -dvvv` prints as `CDHash=`, lowercase hex.
+        if let unique = information[kSecCodeInfoUnique as String] as? Data, !unique.isEmpty {
+            return "cdhash:" + unique.map { String(format: "%02x", $0) }.joined()
+        }
+        // A dictionary carrying neither is what a completely unsigned binary looks like: the call
+        // succeeds and hands back nothing but the executable's path. Verified rather than assumed
+        // — an unsigned build does not report `errSecCSUnsigned` through this entry point, so
+        // relying on that status alone would answer "unknown" for the one case that has a
+        // perfectly well-defined partition identity.
+        return unsignedPartitionIdentity
     }
 
-    /// The raw item data, before any interpretation. Kept separate from the parse so a
-    /// write can merge into the exact JSON that is there rather than a re-encoding of the
-    /// fields this app happens to understand.
-    private static func readPayload() throws -> Data {
+    /// What securityd files code with no signature under.
+    private static let unsignedPartitionIdentity = "unsigned:"
+
+    /// The single line that puts both this app and the CLI back on the item's partition list, for
+    /// the panel to offer when it notices one has been evicted.
+    ///
+    /// The list it names is the one on the item now plus whichever of the two is missing, never
+    /// just the two: `-S` replaces the list outright, so naming only the identities this app cares
+    /// about would quietly revoke any third program that has been granted access. `nil` on either
+    /// of the two questions this cannot answer — the identity of the running build, and what the
+    /// list currently holds — because a replace built on a guess is how a repair evicts the app
+    /// that offered it.
+    public static var partitionRepairCommand: String? {
+        guard let appPartitionIdentity, var identities = partitionIdentities() else { return nil }
+        for required in [cliPartitionIdentity, appPartitionIdentity]
+        where !identities.contains(required) {
+            identities.append(required)
+        }
+        return partitionRepairCommand(
+            admitting: identities, account: itemAccount() ?? NSUserName())
+    }
+
+    /// The shared item's `acct` attribute, so the repair command names the item that is really
+    /// there rather than assuming it was written under the current short user name. Attributes
+    /// only — no `kSecReturnData` — so nothing is decrypted and no dialog can be raised.
+    static func itemAccount() -> String? {
         let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+            let attributes = item as? [String: Any]
+        else { return nil }
+        return attributes[kSecAttrAccount as String] as? String
+    }
+
+    /// Run by the user in a terminal, deliberately, because `security` prompts for the login
+    /// password through `getpass` there and nothing kills it mid-typing — unlike the dialogs the
+    /// CLI's own two-second read timeout tears down. `-S` replaces the list rather than merging
+    /// into it, which is why every identity that is to survive has to be named in one command,
+    /// and there is no `-k`: a password on the command line would land in shell history.
+    public static func partitionRepairCommand(
+        admitting identities: [String], account: String = NSUserName()
+    ) -> String {
+        // Every interpolated field is single-quoted, the account included. It comes from the
+        // item's stored `acct` attribute rather than from anything this app chose, and nothing
+        // guarantees it is a bare short name — a space in it would split the argument and point
+        // `-S` at some other item. That matters more here than in most commands, because `-S`
+        // *replaces* a partition list rather than adding to one, so a mis-parsed invocation
+        // revokes access somewhere instead of failing harmlessly.
+        "security set-generic-password-partition-list "
+            + "-S '\(identities.joined(separator: ","))' "
+            + "-s '\(service)' -a '\(account)' ~/Library/Keychains/login.keychain-db"
+    }
+
+    /// Reads and parses Claude Code's credential item.
+    ///
+    /// `interactive` is the whole ergonomics of this app's Keychain story. Claude Code rewrites
+    /// this item every time it renews, which resets the partition list to `apple-tool:` and
+    /// evicts this app — so a read that is allowed to prompt will, sooner or later, raise a
+    /// login-password dialog. Raised from a poll, that dialog is modal, unannounced, and blocks
+    /// whatever thread asked for it.
+    ///
+    /// So the polling path passes `false` and takes `.accessDenied` for an answer, and the panel
+    /// offers the user a button. Only that button passes `true`, at a moment the user is
+    /// expecting a dialog because they just asked for one.
+    public static func readCredentials(interactive: Bool = false) throws -> ClaudeCredentials {
+        try parseCredentials(from: readItemData(service: service, interactive: interactive))
+    }
+
+    /// Raw item data, before any interpretation.
+    private static func readItemData(service: String, interactive: Bool) throws -> Data {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
+        // Belt and braces: the modern flag is what `SecItem` honours, and the legacy switch is
+        // what the ACL prompt on a legacy keychain item honours. The credential item is a legacy
+        // item, so the second one is the one that actually does the work here — but the flag
+        // costs nothing and covers a future item that is not.
+        if !interactive {
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        }
 
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = withUserInteraction(interactive) {
+            SecItemCopyMatching(query as CFDictionary, &item)
+        }
 
         switch status {
         case errSecSuccess:
@@ -135,80 +312,141 @@ public enum Keychain {
             return data
         case errSecItemNotFound:
             throw KeychainError.notFound
+        case errSecUserCanceled:
+            throw KeychainError.authorizationCancelled
+        case errSecInteractionNotAllowed, errSecInteractionRequired, errSecAuthFailed:
+            throw KeychainError.accessDenied
         default:
             throw KeychainError.unhandled(status)
         }
     }
 
-    /// Writes a refreshed token pair back into the shared item.
+    /// When the item was last changed, read from attributes alone.
     ///
-    /// Two things make this safe to do to an item another process owns. The write is a
-    /// merge, not a replacement: the payload is re-read, the four rotated fields are
-    /// overwritten in place, and every other key — at the top level and inside
-    /// `claudeAiOauth` — survives untouched, including ones this app has never heard of.
-    /// And it is conditional: if the stored refresh token is no longer the one this
-    /// refresh was made with, Claude Code rotated it in the meantime, its tokens are the
-    /// newer pair, and ours are discarded rather than written over them.
+    /// The cheap half of the whole credential story: attributes are not encrypted, so this
+    /// decrypts nothing, needs no authorization and cannot raise a dialog even when the partition
+    /// list has evicted this app. That makes it safe to call on a schedule, which is what lets
+    /// `CredentialStore` hold one decrypted credential in memory for hours and still notice the
+    /// moment Claude Code renews — without a single further read of the payload.
     ///
-    /// Returns false for that lost race, which is not an error — the caller re-reads and
-    /// uses what the CLI wrote.
-    @discardableResult
-    public static func storeRefreshedTokens(
-        _ tokens: RefreshedTokens, replacing expectedRefreshToken: String
-    ) throws -> Bool {
-        let payload = try readPayload()
-        guard var root = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] else {
-            throw KeychainError.malformed("Credential payload is not readable credential JSON")
-        }
-        guard var oauth = root[Self.oauthKey] as? [String: Any] else {
-            throw KeychainError.malformed("Credential JSON has no `claudeAiOauth` object")
-        }
-        guard oauth["refreshToken"] as? String == expectedRefreshToken else { return false }
-
-        oauth["accessToken"] = tokens.accessToken
-        oauth["refreshToken"] = tokens.refreshToken
-        oauth["expiresAt"] = Self.epochMilliseconds(tokens.expiresAt)
-        // Only written when the server sent one: a refresh that omits the field is saying
-        // the refresh token's own deadline has not moved, and inventing one from `nil`
-        // would erase the deadline already stored.
-        if let refreshExpiry = tokens.refreshTokenExpiresAt {
-            oauth["refreshTokenExpiresAt"] = Self.epochMilliseconds(refreshExpiry)
-        }
-        if !tokens.scopes.isEmpty {
-            oauth["scopes"] = tokens.scopes
-        }
-        root[Self.oauthKey] = oauth
-
-        let encoded: Data
-        do {
-            encoded = try JSONSerialization.data(withJSONObject: root)
-        } catch {
-            throw KeychainError.malformed("Refreshed credentials could not be encoded")
-        }
-
+    /// `nil` when there is no item, or when the attribute is missing.
+    public static func modificationDate(service: String = Keychain.service) -> Date? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        let status = SecItemUpdate(
-            query as CFDictionary, [kSecValueData as String: encoded] as CFDictionary)
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+            let attributes = item as? [String: Any]
+        else { return nil }
+        return attributes[kSecAttrModificationDate as String] as? Date
+    }
 
-        switch status {
-        case errSecSuccess:
-            return true
-        case errSecItemNotFound:
-            throw KeychainError.notFound
-        default:
-            throw KeychainError.unhandled(status)
+    /// Runs `body` with legacy Keychain dialogs suppressed unless `interactive`.
+    ///
+    /// `SecKeychainSetUserInteractionAllowed` is process-global, which would be a hazard if two
+    /// threads used it at once. They cannot: every call into this type goes through
+    /// `CredentialStore`, an actor, so these are serialised. The previous setting is restored
+    /// rather than assumed, so an interactive read cannot leave the process able to prompt.
+    private static func withUserInteraction<T>(_ interactive: Bool, _ body: () -> T) -> T {
+        var previous: DarwinBoolean = true
+        let queried = SecKeychainGetUserInteractionAllowed(&previous) == errSecSuccess
+        SecKeychainSetUserInteractionAllowed(interactive)
+        defer { SecKeychainSetUserInteractionAllowed(queried ? previous.boolValue : true) }
+        return body()
+    }
+
+    // MARK: - This app's own credential
+
+    /// Reads the token the user dedicated to ClaudeMeter, or `nil` when there is none.
+    ///
+    /// No `interactive` parameter, because the question never arises: this app created the item,
+    /// this app is the only writer, and nothing else on the machine resets its partition list.
+    /// An error here is a real fault rather than a permission to negotiate, so a missing or
+    /// unreadable item simply reads as "no dedicated token" and the shared item is used instead.
+    public static func readOwnCredentials() -> ClaudeCredentials? {
+        guard let data = try? readItemData(service: ownService, interactive: false) else {
+            return nil
         }
+        return try? parseCredentials(from: data)
+    }
+
+    /// Writes this app's own credential, creating the item if it is not there yet.
+    ///
+    /// Stored in Claude Code's own JSON shape rather than a private one, so the same parser reads
+    /// both and a dedicated token is not a second credential format to keep working.
+    public static func storeOwnCredentials(_ credentials: ClaudeCredentials) throws {
+        let encoded = try encode(credentials)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ownService,
+            kSecAttrAccount as String: ownAccount,
+        ]
+
+        let update = SecItemUpdate(
+            query as CFDictionary, [kSecValueData as String: encoded] as CFDictionary)
+        if update == errSecSuccess { return }
+        guard update == errSecItemNotFound else { throw KeychainError.unhandled(update) }
+
+        var insert = query
+        insert[kSecValueData as String] = encoded
+        // Readable whenever the keychain is unlocked, and never synced to other devices: the
+        // token is machine-local by nature and iCloud Keychain would put it somewhere this app
+        // cannot reason about.
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+        insert[kSecAttrSynchronizable as String] = false
+        let added = SecItemAdd(insert as CFDictionary, nil)
+        guard added == errSecSuccess else { throw KeychainError.unhandled(added) }
+    }
+
+    /// Forgets this app's own credential. Not an error when there was none.
+    public static func deleteOwnCredentials() {
+        SecItemDelete(
+            [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: ownService,
+                kSecAttrAccount as String: ownAccount,
+            ] as CFDictionary)
     }
 
     private static let oauthKey = "claudeAiOauth"
 
-    /// The CLI stores deadlines as epoch milliseconds, and as whole numbers. Rounding here
-    /// rather than truncating a `Double` keeps a re-read from landing a millisecond early.
+    /// `ClaudeCredentials` in the CLI's storage shape, so `parseCredentials` reads it back.
+    /// Exposed for tests, which round-trip it rather than trusting the two halves to agree.
+    public static func encode(_ credentials: ClaudeCredentials) throws -> Data {
+        var oauth: [String: Any] = [
+            "accessToken": credentials.accessToken,
+            "expiresAt": epochMilliseconds(credentials.expiresAt),
+        ]
+        if let refreshToken = credentials.refreshToken { oauth["refreshToken"] = refreshToken }
+        if let deadline = credentials.refreshTokenExpiresAt {
+            oauth["refreshTokenExpiresAt"] = epochMilliseconds(deadline)
+        }
+        if !credentials.scopes.isEmpty { oauth["scopes"] = credentials.scopes }
+        if let clientID = credentials.clientID { oauth["clientId"] = clientID }
+        if let plan = credentials.subscriptionType { oauth["subscriptionType"] = plan }
+        if let tier = credentials.rateLimitTier { oauth["rateLimitTier"] = tier }
+
+        do {
+            return try JSONSerialization.data(withJSONObject: [oauthKey: oauth])
+        } catch {
+            throw KeychainError.malformed("Credentials could not be encoded")
+        }
+    }
+
+    /// The CLI stores deadlines as epoch milliseconds, and as whole numbers.
+    ///
+    /// Rounded *up*, not to nearest. A `Date` carries more precision than the field does, so
+    /// something has to give; giving it upwards means a stored deadline is never earlier than the
+    /// one handed in, and a write-then-read of a credential can only ever move expiry later. To
+    /// nearest, the same round trip could retire a token up to half a millisecond early. Nothing
+    /// downstream would notice half a millisecond — the lead time is five minutes — but "expiry
+    /// never moves backwards through storage" is a property worth being able to state without
+    /// qualification, and it costs one function call.
     private static func epochMilliseconds(_ date: Date) -> Int {
-        Int((date.timeIntervalSince1970 * 1000).rounded())
+        Int((date.timeIntervalSince1970 * 1000).rounded(.up))
     }
 
     /// Pure parse, exposed so tests run with no Keychain access.
@@ -249,6 +487,126 @@ public enum Keychain {
             subscriptionType: oauth.subscriptionType,
             rateLimitTier: oauth.rateLimitTier
         )
+    }
+}
+
+// MARK: - Partition list
+
+extension Keychain {
+    /// Which identities the shared item's partition list currently admits, or `nil` when that
+    /// could not be determined.
+    ///
+    /// Nothing here decrypts the item: an ACL is copied without authorization, which is why
+    /// `security dump-keychain -a` reads every item on the machine without raising a single
+    /// dialog. `kSecReturnRef` is used rather than `kSecReturnData` for exactly that reason, and
+    /// this is the one Keychain call in the app that is safe to make on a schedule.
+    ///
+    /// The distinction between `nil` and `[]` is the whole safety property of the return type. An
+    /// empty list means the item admits nobody, which is a real and reportable state; `nil` means
+    /// the question went unanswered, and must never be rendered as an answer.
+    ///
+    /// The legacy `SecKeychain*` calls below warn on sight: they were deprecated with the rest of
+    /// the legacy Keychain API in 10.10 and never replaced. Partition lists exist only on legacy
+    /// keychain items, the modern `SecItem` API cannot see an ACL at all, and these are the same
+    /// entry points `/usr/bin/security` uses to print one. The warnings are the price of asking
+    /// a question that only the old API can answer.
+    public static func partitionIdentities() -> [String]? {
+        // The same predicate the credential read uses, so the list reported here is the list on
+        // the item this app actually polls with. Naming an account instead would let the two
+        // diverge and turn a real lockout into a silent "unknown".
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnRef as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        // Conditionally cast rather than forced: `kSecReturnRef` on a generic password hands back
+        // a legacy keychain item today, and a build that ever gets something else back must
+        // answer "unknown" rather than trap in a menu bar app.
+        var match: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &match) == errSecSuccess,
+            let match, CFGetTypeID(match) == SecKeychainItemGetTypeID()
+        else { return nil }
+        let item = unsafeBitCast(match, to: SecKeychainItem.self)
+
+        var access: SecAccess?
+        guard SecKeychainItemCopyAccess(item, &access) == errSecSuccess, let access else {
+            return nil
+        }
+
+        var list: CFArray?
+        guard SecAccessCopyACLList(access, &list) == errSecSuccess,
+            let acls = list as? [SecACL]
+        else { return nil }
+
+        // The partition list lives in the description of the one ACL entry carrying the
+        // partition authorization. Every other entry describes who may decrypt or change the
+        // item, which is a different question.
+        for acl in acls {
+            let authorizations = SecACLCopyAuthorizations(acl) as? [String] ?? []
+            guard authorizations.contains(kSecACLAuthorizationPartitionID as String) else {
+                continue
+            }
+            var applications: CFArray?
+            var description: CFString?
+            var prompt = SecKeychainPromptSelector()
+            guard SecACLCopyContents(acl, &applications, &description, &prompt) == errSecSuccess,
+                let description = description as String?
+            else { return nil }
+            return partitionIdentities(fromACLDescription: description)
+        }
+        return nil
+    }
+
+    /// Reads the identities out of a partition ACL's description string.
+    ///
+    /// The description is not the tidy `teamid:X, apple-tool:` line `security dump-keychain`
+    /// prints — that is the tool's own summary. What is stored is an XML plist whose
+    /// `Partitions` key holds an array of identity strings, and it arrives hex-encoded, because
+    /// the field is nominally human-readable text and plist bytes are not. Both forms are
+    /// accepted: the hex is decoded first, and a description that is already plist bytes is
+    /// parsed as it stands, so a future macOS that stops encoding the field cannot silently turn
+    /// this into a function that always answers "unknown".
+    ///
+    /// Split out from the Security-framework half so the parse — the part that can be wrong in a
+    /// way no status code reports — is testable without a Keychain.
+    public static func partitionIdentities(fromACLDescription description: String) -> [String]? {
+        let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let bytes = hexDecoded(trimmed) ?? Data(trimmed.utf8)
+        guard
+            let plist = try? PropertyListSerialization.propertyList(from: bytes, format: nil)
+                as? [String: Any],
+            let partitions = plist["Partitions"] as? [String]
+        else { return nil }
+        return partitions
+    }
+
+    /// `nil` for anything that is not a whole number of hex bytes, which is how a description
+    /// holding plain plist bytes is told apart from an encoded one.
+    private static func hexDecoded(_ text: String) -> Data? {
+        guard text.count % 2 == 0 else { return nil }
+        var bytes = Data()
+        bytes.reserveCapacity(text.count / 2)
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(index, offsetBy: 2)
+            guard let byte = UInt8(text[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+        return bytes
+    }
+
+    /// Whether the partition list locks Claude Code out of the item it owns.
+    ///
+    /// An unanswered question is not a lockout: `nil` reports false, so a machine where the ACL
+    /// cannot be read never shows a warning telling the user to repair something that may well
+    /// be fine.
+    public static func isCLILockedOut(partitions: [String]?) -> Bool {
+        guard let partitions else { return false }
+        return !partitions.contains(cliPartitionIdentity)
     }
 }
 

@@ -65,8 +65,10 @@ breakdown is open, since that section alone is taller than a single column can s
 Menu bar format; the idle gap that separates one stretch of work from the next (5 to 30 minutes,
 default 10) with a live wall-clock readout; the poll cadence to aim for (90 s to 15 min, default 3
 min) alongside the effective one whenever a rate limit has widened it; the notification toggle and
-threshold (50% to 99%, default 90); launch at login via `SMAppService`; and a footer naming the
-support directory and restating that the OAuth token is read but never written.
+threshold (50% to 99%, default 90); launch at login via `SMAppService`; an optional token of
+ClaudeMeter's own from `claude setup-token`, which removes the Keychain prompts entirely (see
+[The credential model](#the-credential-model)); and a footer naming the support directory and
+restating where the OAuth token goes.
 
 ## Requirements
 
@@ -91,17 +93,22 @@ support directory and restating that the OAuth token is read but never written.
 
 SwiftPM produces a bare executable, so the bundle is assembled by hand: the Makefile creates the
 `Contents` tree, copies the binary and `Packaging/Info.plist`, writes `PkgInfo`, copies any SwiftPM
-resource bundles into `Contents/Resources` so `Bundle.module` resolves, and signs the result ad hoc
-(`codesign --force --sign -`).
+resource bundles into `Contents/Resources` so `Bundle.module` resolves, and signs the result.
 
-Two consequences of that ad-hoc signature are worth knowing before you build. An ad-hoc signature
-gives the app a new code identity every time it is rebuilt, so macOS treats each rebuild as a
-different program and asks for Keychain access again — every launch, in practice, since the
-credential item's access list never matches the app that is asking. Any stable identity avoids the
-repeat prompts, and `make` takes one: `make install SIGN_ID="Apple Development: you@example.com
-(TEAMID)"`, or `export SIGN_ID=...` once, from `security find-identity -v -p codesigning`. A
-self-signed certificate made in Keychain Access does the job as well as a developer one. The default
-stays ad-hoc, so nothing is required to build. And the app must be run from the bundle for two features to work at all:
+**`make app` needs a signing identity and stops without one.** An ad-hoc signature gives the app a
+new code identity every time it is rebuilt, so macOS treats each rebuild as a different program and
+asks for Keychain access again — every launch, in practice, since the credential item's access list
+never matches the app that is asking, and "Always Allow" cannot settle it because the next build is
+a different program again. Any stable identity avoids that, and `make` takes one:
+`make install SIGN_ID="Apple Development: you@example.com (TEAMID)"`, or `export SIGN_ID=...` once,
+from `security find-identity -v -p codesigning`. A self-signed certificate made in Keychain Access
+does the job as well as a developer one. `make app ALLOW_ADHOC=1` signs ad hoc anyway, for a
+throwaway build that will not read the Keychain. Whichever you use, the repair command the app
+offers is built from the signature of the copy that is running — a team identity when there is one,
+the build's code directory hash when there is not — so it never names an identity this build does
+not present.
+
+The app must also be run from the bundle for two features to work at all:
 `UNUserNotificationCenter.current()` traps in a process with no bundle identifier, so every
 notification path degrades to a no-op when the binary is run straight out of `.build`, and
 `SMAppService` reports `notFound` there, which the settings pane surfaces as a note instead of a
@@ -187,47 +194,90 @@ cache rates are derived from the input rate (1.25× for a 5-minute cache write, 
 
 `Keychain` reads the generic-password item for service `Claude Code-credentials` and parses
 `claudeAiOauth`: the access token and its `expiresAt` (epoch milliseconds), plus the refresh token,
-that token's own deadline, the granted scopes, and the OAuth client the pair was issued to. The
-Keychain is re-read on **every** poll rather than cached, so a token Claude Code has just rotated is
-picked up without a relaunch.
+that token's own deadline, the granted scopes, and the OAuth client the pair was issued to.
 
-An access token lasts hours, so an app that only ever reads one spends a good part of its life
-looking at an expired credential. ClaudeMeter renews instead. `TokenRefresher` posts the refresh
+**Reading is all it does.** ClaudeMeter never writes that item and never renews Claude Code's
+token. That is a design rule rather than a default, and it is forced by two measured facts.
+
+The first is the partition list — the set of code identities macOS lets read a Keychain item
+without a password prompt. Changing an item's *data* makes securityd rebuild that list around the
+writer alone. This was measured rather than assumed: against a throwaway item seeded with three
+identities, both `SecItemUpdate` and the legacy `SecKeychainItemModifyContent` collapsed the list
+to the writer, so there is no API that writes and leaves the list intact. A write by ClaudeMeter
+therefore evicts `apple-tool:`, the identity `claude` reads under, and every CLI command starts
+raising a password dialog. It is symmetric: a write through `/usr/bin/security` evicts
+ClaudeMeter's team identity just as completely. Reads never touch the list.
+
+The second is refresh-token rotation. Renewing means spending Claude Code's refresh token, and the
+endpoint issues a new one — so the CLI's stored copy stops working the moment ClaudeMeter spends
+it. The replacement can only be handed over by writing the shared item.
+
+Those two together leave no safe move. Saving a renewal locks `claude` out of its own credential;
+not saving it signs `claude` out. So ClaudeMeter does neither: when the token ages out it settles
+on `Waiting for Claude Code` and waits for the CLI to renew on its own schedule, which is also the
+only time the numbers are moving. Transcript statistics are unaffected throughout. A previous
+version offered this as a setting; the setting is gone, because neither of its positions was
+defensible.
+
+### Not prompting
+
+The reverse eviction still happens: `claude` renews, writes the item, and ClaudeMeter drops off the
+permitted list. The response to that is the second half of the design — **ClaudeMeter never raises
+an authorization dialog on its own initiative.** Every automatic read is made with dialogs
+suppressed (`kSecUseAuthenticationUI` plus `SecKeychainSetUserInteractionAllowed(false)`), so a
+refusal comes back as `KeychainError.accessDenied`, a value the poll loop handles, instead of a
+modal window over whatever the user was doing. The panel then shows `Keychain access needed` with
+an *Authorize…* button, and that button is the only path in the app permitted to prompt.
+
+`CredentialStore` is an `actor`, and deliberately not `@MainActor`. Every Security-framework call
+in the app goes through it, so securityd round trips — and the modal wait when the user does
+authorize — happen nowhere the UI can block on them. It also caches: the decrypted credential is
+held in memory and reused until it nears its deadline or the item changes underneath, and "has it
+changed" is answered by reading `kSecAttrModificationDate`, an attributes-only query that decrypts
+nothing, needs no authorization and cannot raise a dialog. Steady state is zero decrypting reads
+for as long as a token lives, while a rotation by the CLI is still noticed within one poll.
+
+### A token of its own
+
+To avoid the prompts entirely, Settings ▸ Credentials accepts a token from `claude setup-token`.
+It is stored in `com.claudemeter.ClaudeMeter-credentials`, an item ClaudeMeter creates and is the
+sole writer of, so nothing else on the machine ever resets its permitted list. With one set,
+Claude Code's item is not read at all and no dialog can arise. The token is spent on a real request
+before it is accepted, so a bad paste is reported immediately rather than at the next poll.
+
+A dedicated credential is also the one ClaudeMeter *may* renew: `TokenRefresher` posts its refresh
 token to `platform.claude.com/v1/oauth/token` with Claude Code's own client identifier and the
-scopes already held — the same exchange the CLI performs when its token ages out, read out of the
-shipped binary rather than guessed, so a token either process renews is one the other accepts. It
-runs when the stored token is within five minutes of its deadline, which is wider than the slowest
-poll interval: every poll therefore starts on a token that will still be valid when its request
-lands, and the app never discovers expiry by being refused.
+scopes already held, and the result goes back into ClaudeMeter's own item. Nobody else holds a copy
+to be invalidated and nobody else's access is reset, so the objection that rules out renewing the
+CLI's credential does not apply. `CredentialPolicy` enforces the distinction: `.renew` is
+unreachable for a `.claudeCode` credential in every state, which is asserted directly in the tests.
 
-The item is shared with Claude Code, so the write back is the narrow part of the design:
+### Repairing older damage
 
-- **It is a merge, not a replacement.** The payload is re-read, four fields are overwritten in
-  place, and every other key — at the top level and inside `claudeAiOauth` — survives untouched,
-  including ones this app has never heard of.
-- **It is conditional.** The write only lands if the stored refresh token is still the one this
-  refresh was made with. If Claude Code refreshed first, its pair is the newer one and ours is
-  discarded — the first writer wins, not the last. That is the same compare-and-swap the CLI
-  applies to its own credential writes, which is what keeps two processes off each other's tokens.
-- **It is retried.** A Keychain write can fail transiently; a lost write would leave the CLI holding
-  a refresh token the server may have rotated away, so it is worth more than one attempt.
-- **A refresh is only ever spent close to expiry**, when the CLI was about to make the same trade
-  anyway. That is the mitigation for the one failure this code cannot repair: a refresh that
-  succeeds server-side and then cannot be persisted.
+ClaudeMeter can no longer cause a lockout, but a machine where an older version did still needs it
+undone once. The check costs nothing — an ACL can be copied without authorization — so the store
+re-reads the list periodically, and the panel offers the one
+`security set-generic-password-partition-list` line that restores both identities.
+`scripts/repair-keychain-partition-list.sh` is the same repair with a confirmation step; it adds
+the missing identities rather than replacing the list, so a third program that has been granted
+access keeps it, and it takes `APP_IDENTITY=` for a build signed with something other than this
+project's certificate.
 
-What cannot be renewed is reported rather than retried. No refresh token (the shape
-`claude setup-token` writes), a refresh token past its own deadline, or a grant the server refuses
-outright are all permanent, and the panel says `Sign in again`. A network failure or a 5xx is not
-permanent: if the access token still has life in it the poll goes ahead on it, and the renewal is
-tried again next time.
+### What is reported rather than retried
 
-A 401 or 403 from a request that *was* made triggers one re-read before it is reported, since the
-token may have rotated mid-request. `LimitsClient` maps both statuses to the same unauthorized case,
-so both take that path. If the stored token has changed, the retry uses it; otherwise a renewal is
-forced — a token the server rejects is spent whatever its stored deadline claims — and the request
-is made once more. A second 401 on a token minted seconds earlier is not something another renewal
-fixes, so it stops there. If the item has disappeared entirely in the meantime, the app says "not
-signed in" rather than "sign in again", because those need different actions from you.
+No refresh token (the shape `claude setup-token` writes), a refresh token past its own deadline, or
+a grant the server refuses outright are all permanent, and the panel says `Sign in again` — naming
+the dedicated token instead when that is the one that died, since the two need different actions. A
+network failure or a 5xx is not permanent: if the access token still has life in it the poll goes
+ahead on it, and the renewal is tried again next time.
+
+A 401 or 403 from a request that *was* made drops the cached credential and re-reads once before
+reporting, since the token may have rotated mid-request. `LimitsClient` maps both statuses to the
+same unauthorized case. If the stored token has changed, the retry uses it; if it has not, a
+dedicated credential is renewed and the request made once more, while Claude Code's is left for
+Claude Code. A second 401 on a token minted seconds earlier is not something another renewal fixes,
+so it stops there. If the item has disappeared entirely in the meantime, the app says "not signed
+in" rather than "sign in again", because those need different actions from you.
 
 Credential states are handled separately from transport failures. No request was made, so there is
 nothing to back off from: the cached snapshot stays on screen, the normal cadence continues, and a

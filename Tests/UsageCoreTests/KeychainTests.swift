@@ -3,9 +3,10 @@ import Testing
 
 import UsageCore
 
-// These tests never call `Keychain.readCredentials()` — that would touch the real
-// login keychain and prompt. Everything goes through the pure `parseCredentials`
-// entry point, so no filesystem, network, or Keychain access is involved.
+// These tests never call `Keychain.readCredentials()` or `Keychain.partitionIdentities()` —
+// that would touch the real login keychain. Everything goes through the pure
+// `parseCredentials` and `partitionIdentities(fromACLDescription:)` entry points, so no
+// filesystem, network, or Keychain access is involved.
 
 private let credentialShapeJSON = """
 {
@@ -237,5 +238,251 @@ struct KeychainTests {
         #expect(credentials.scopes.isEmpty)
         #expect(credentials.subscriptionType == nil)
         #expect(credentials.refreshToken == nil)
+    }
+}
+
+// MARK: - Partition list
+
+/// The ACL description as securityd stores it: a plist, hex-encoded, because the field is
+/// nominally display text. `hexPlist` reproduces that encoding rather than pasting a captured
+/// 600-character literal; `beginsWithXMLSignature` is what ties it back to the real bytes, which
+/// start `3c3f786d6c` — `<?xml`.
+private func hexPlist(partitions: [String]) -> String {
+    hex(plist(partitions: partitions))
+}
+
+private func plist(partitions: [String]) -> String {
+    let entries = partitions.map { "<string>\($0)</string>" }.joined()
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        + "<plist version=\"1.0\"><dict><key>Partitions</key><array>\(entries)</array>"
+        + "<key>Version</key><integer>1</integer></dict></plist>"
+}
+
+private func hex(_ text: String) -> String {
+    text.utf8.map { String(format: "%02x", $0) }.joined()
+}
+
+@Suite("Keychain partition list")
+struct KeychainPartitionTests {
+    @Test("The encoded description is what securityd actually stores")
+    func fixtureMatchesObservedBytes() {
+        #expect(hexPlist(partitions: ["apple-tool:"]).hasPrefix("3c3f786d6c"))
+    }
+
+    @Test("A single identity is read out of the encoded description")
+    func singleIdentity() {
+        #expect(
+            Keychain.partitionIdentities(fromACLDescription: hexPlist(partitions: ["apple-tool:"]))
+                == ["apple-tool:"])
+    }
+
+    @Test("Both identities are read, in the order stored")
+    func twoIdentities() {
+        let description = hexPlist(partitions: ["apple-tool:", "teamid:7DJSY2AKJK"])
+        #expect(
+            Keychain.partitionIdentities(fromACLDescription: description)
+                == ["apple-tool:", "teamid:7DJSY2AKJK"])
+    }
+
+    @Test("A description that is already plist bytes is read as it stands")
+    func undecoratedPlist() {
+        #expect(
+            Keychain.partitionIdentities(fromACLDescription: plist(partitions: ["apple-tool:"]))
+                == ["apple-tool:"])
+    }
+
+    @Test("Surrounding whitespace does not defeat the decode")
+    func trimsWhitespace() {
+        let description = "  \n\(hexPlist(partitions: ["apple-tool:"]))\n"
+        #expect(Keychain.partitionIdentities(fromACLDescription: description) == ["apple-tool:"])
+    }
+
+    @Test("An item admitting nobody reads as empty, which is an answer")
+    func emptyPartitionList() {
+        #expect(Keychain.partitionIdentities(fromACLDescription: hexPlist(partitions: [])) == [])
+    }
+
+    // Every case below must be nil rather than `[]`: "could not tell" and "admits nobody" drive
+    // opposite decisions, and a parse failure rendering as a lockout would tell users to repair
+    // an item that is fine.
+    @Test("An unreadable description is nil, never an empty list")
+    func unreadableDescriptions() {
+        #expect(Keychain.partitionIdentities(fromACLDescription: "") == nil)
+        #expect(Keychain.partitionIdentities(fromACLDescription: "   \n ") == nil)
+        // Odd-length hex, so the hex decode declines and the raw text is not a plist either.
+        #expect(Keychain.partitionIdentities(fromACLDescription: "3c3f786d6") == nil)
+        #expect(Keychain.partitionIdentities(fromACLDescription: "not hex at all") == nil)
+        // Even-length, decodes cleanly, and decodes to something that is not a plist.
+        #expect(Keychain.partitionIdentities(fromACLDescription: hex("hello!")) == nil)
+    }
+
+    @Test("A plist with no Partitions key is nil")
+    func plistWithoutPartitions() {
+        let other = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            + "<plist version=\"1.0\"><dict><key>Version</key><integer>1</integer></dict></plist>"
+        #expect(Keychain.partitionIdentities(fromACLDescription: hex(other)) == nil)
+    }
+
+    @Test("Partitions holding something other than an array of strings is nil")
+    func partitionsWrongShape() {
+        let scalar = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            + "<plist version=\"1.0\"><dict><key>Partitions</key>"
+            + "<string>apple-tool:</string></dict></plist>"
+        #expect(Keychain.partitionIdentities(fromACLDescription: hex(scalar)) == nil)
+    }
+
+    @Test("A lockout is the CLI's identity missing, and nothing else")
+    func lockoutVerdict() {
+        #expect(Keychain.isCLILockedOut(partitions: nil) == false)
+        #expect(Keychain.isCLILockedOut(partitions: ["apple-tool:"]) == false)
+        #expect(Keychain.isCLILockedOut(partitions: ["teamid:7DJSY2AKJK", "apple-tool:"]) == false)
+        #expect(Keychain.isCLILockedOut(partitions: ["teamid:7DJSY2AKJK"]) == true)
+        #expect(Keychain.isCLILockedOut(partitions: []) == true)
+    }
+
+    @Test("The repair command names every identity it is given, and takes no password")
+    func repairCommand() {
+        let command = Keychain.partitionRepairCommand(
+            admitting: [Keychain.cliPartitionIdentity, "teamid:ABCDE12345"], account: "someone")
+        // `-S` replaces the list, so dropping either identity would move the lockout rather than
+        // clear it.
+        #expect(command.contains("-S 'apple-tool:,teamid:ABCDE12345'"))
+        // Exact service match, so it cannot reach one of the item's suffixed siblings.
+        #expect(command.contains("-s '\(Keychain.service)'"))
+        #expect(command.contains("-a 'someone'"))
+        #expect(command.contains("set-generic-password-partition-list"))
+        // `-k` would put the login password in shell history, and `security` says so itself.
+        #expect(command.contains(" -k ") == false)
+        // Nothing here may decrypt an item.
+        #expect(command.contains(" -w") == false)
+        #expect(command.contains(" -g") == false)
+    }
+
+    /// The identity is read from the running code rather than hard-coded, because a command built
+    /// around the wrong one would evict the copy of ClaudeMeter the user is looking at. Reading a
+    /// process's own signature touches no Keychain, so it is in scope for this file. What the test
+    /// binary is signed with varies by machine, so what is asserted is the shape: one of the three
+    /// forms securityd files code under, or an honest `nil`.
+    @Test("This build's own partition identity is derived, not assumed")
+    func ownIdentity() {
+        guard let identity = Keychain.appPartitionIdentity else { return }
+        #expect(
+            identity.hasPrefix("teamid:") || identity.hasPrefix("cdhash:")
+                || identity == "unsigned:")
+        // A prefix with nothing after it would name no identity at all, and `-S` would take it
+        // as a request to admit something that does not exist.
+        #expect(identity.count > "unsigned:".count || identity == "unsigned:")
+    }
+
+    // MARK: - Round trip
+
+    /// The dedicated credential is stored in Claude Code's own JSON shape rather than a private
+    /// one, so a single parser reads both. That only holds if the encoder and the parser agree,
+    /// and they are written far apart — hence a round trip rather than two sets of assertions.
+    @Test("Encoding and parsing a credential is lossless for every field carried")
+    func encodeParseRoundTrip() throws {
+        let original = try parse(credentialShapeJSON)
+        let encoded = try Keychain.encode(original)
+        let recovered = try Keychain.parseCredentials(from: encoded)
+        #expect(recovered == original)
+    }
+
+    /// Epoch milliseconds are stored as whole numbers, so a deadline carrying sub-millisecond
+    /// precision must not come back a hair early — the whole point of a lead time is that the
+    /// token outlives the request, and a re-read landing before the stored instant erodes it.
+    @Test("A round-tripped deadline never moves backwards")
+    func roundTripDeadlineDoesNotRegress() throws {
+        let expiry = Date(timeIntervalSince1970: 1_700_000_000.9994)
+        let original = ClaudeCredentials(
+            accessToken: "t", expiresAt: expiry, subscriptionType: nil, rateLimitTier: nil)
+        let recovered = try Keychain.parseCredentials(from: Keychain.encode(original))
+        #expect(recovered.expiresAt >= expiry)
+        #expect(recovered.expiresAt.timeIntervalSince(expiry) < 0.001)
+    }
+
+    /// A credential with nothing optional set must still encode to something the parser accepts.
+    /// The encoder omits absent fields rather than writing nulls, and a null `accessToken` would
+    /// fail the parse outright.
+    @Test("A minimal credential survives the round trip")
+    func minimalRoundTrip() throws {
+        let minimal = ClaudeCredentials(
+            accessToken: "only-a-token",
+            expiresAt: Date(timeIntervalSince1970: 1_700_000_000),
+            subscriptionType: nil,
+            rateLimitTier: nil)
+        let recovered = try Keychain.parseCredentials(from: Keychain.encode(minimal))
+        #expect(recovered == minimal)
+        #expect(recovered.refreshToken == nil)
+        #expect(recovered.scopes.isEmpty)
+    }
+
+    /// The two items must never be confused for one another: one is read-only and shared with the
+    /// CLI, the other is this app's to write. A collision would put a dedicated token into Claude
+    /// Code's item, which is the exact write the redesign exists to prevent.
+    @Test("This app's own item is a different service from Claude Code's")
+    func ownServiceIsDistinct() {
+        #expect(Keychain.ownService != Keychain.service)
+        #expect(Keychain.ownService.contains("ClaudeMeter"))
+    }
+
+    // MARK: - Errors
+
+    /// `AppModel` routes on this: an authorization problem becomes a button, anything else
+    /// becomes a fault. Misclassifying `.notFound` as recoverable would offer the user an
+    /// Authorize button for a machine that has never signed in.
+    @Test("Only the two authorization failures are offered as recoverable")
+    func authorizationProblemClassification() {
+        #expect(KeychainError.accessDenied.isAuthorizationProblem)
+        #expect(KeychainError.authorizationCancelled.isAuthorizationProblem)
+        #expect(KeychainError.notFound.isAuthorizationProblem == false)
+        #expect(KeychainError.malformed("x").isAuthorizationProblem == false)
+        #expect(KeychainError.unhandled(-1).isAuthorizationProblem == false)
+    }
+
+    /// Every case is shown to the user verbatim, so an empty description would render a blank
+    /// notice row with no explanation of why the meter stopped.
+    @Test("Every error states itself")
+    func everyErrorDescribes() {
+        let errors: [KeychainError] = [
+            .notFound, .malformed("detail"), .accessDenied, .authorizationCancelled,
+            .unhandled(-25300),
+        ]
+        for error in errors {
+            #expect(error.errorDescription?.isEmpty == false)
+        }
+    }
+
+    // MARK: - The dedicated token
+
+    /// The bug this covers: the value stored was trimmed and the value validated was not, so a
+    /// token copied out of a terminal was saved, then spent as a different string, refused, and
+    /// deleted — with the user told they had pasted it wrong.
+    @Test("A pasted token is normalised the same way wherever it is asked for")
+    func pastedTokenIsTrimmed() throws {
+        let bare = "sk-ant-oat01-EXAMPLE"
+        for pasted in ["\(bare)\n", "  \(bare)  ", "\t\(bare)\r\n", bare] {
+            #expect(try CredentialStore.normalisedToken(pasted) == bare)
+        }
+    }
+
+    /// Whitespace-only input is not a token with an empty name; it is a user who pressed Use on an
+    /// empty field, and storing it would leave the app polling with an empty bearer header.
+    @Test("A blank token is refused rather than stored")
+    func blankTokenRefused() {
+        for blank in ["", "   ", "\n", "\t \n"] {
+            #expect(throws: KeychainError.self) { try CredentialStore.normalisedToken(blank) }
+        }
+    }
+
+    /// `-S` replaces a partition list rather than adding to it, so an argument that splits does
+    /// not fail harmlessly — it revokes access on whatever item it lands on instead. The account
+    /// is read from the item's stored attribute, so it is not this app's to assume well-formed.
+    @Test("Every field of the repair command is quoted, including the account")
+    func repairCommandQuotesTheAccount() {
+        let command = Keychain.partitionRepairCommand(
+            admitting: ["apple-tool:"], account: "first last")
+        #expect(command.contains("-a 'first last'"))
+        // The whole point: no bare occurrence that the shell would split into two words.
+        #expect(command.contains("-a first last") == false)
     }
 }
