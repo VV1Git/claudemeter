@@ -360,7 +360,8 @@ defaults; nothing here is sent anywhere.
 | Menu bar | Format | Which of the four menu bar formats is drawn. |
 | Usage hours | Idle gap (5–30 min) | The pause that ends an active stretch. Drives the sessions list, the `Sessions` tile, and `Wall clock`. Does not affect agent hours. |
 | Refresh | Check limits every (90 s, 2, 3, 5, 10, 15 min) | The cadence to aim for. A rate limit can still widen it; a second row appears showing the effective one when it has. |
-| Credentials | Token | Paste a token from `claude setup-token` to give ClaudeMeter its own credential, or forget one already set. Optional. |
+| Credentials | Sign In with Claude | Signs in through your browser and gives ClaudeMeter a credential of its own, or forgets one already set. Optional, and the way to stop the Keychain prompts. |
+| Credentials | Token from `claude setup-token` | The older route, behind a disclosure. Works, but carries nothing to renew itself with. |
 | Alerts | Notify me when a limit is running out | Master switch for notifications. Off by default. |
 | Alerts | Alert at N% of a window (50–99, steps of 5) | Threshold crossing that triggers an alert. |
 | Startup | Launch ClaudeMeter at login | Registers or unregisters the app as a login item. |
@@ -401,11 +402,20 @@ item, and that drops ClaudeMeter off the permitted list. ClaudeMeter never raise
 dialog on its own — the read is made with system dialogs suppressed, so it fails cleanly and the
 panel shows `Keychain access needed` with an *Authorize…* button you press when it suits you.
 
-To stop even that, run `claude setup-token` and paste the token into Settings ▸ Credentials.
-It goes into a Keychain item ClaudeMeter creates and is the sole writer of, so nothing ever resets
-its permitted list, no dialog can arise, and Claude Code's own credential is never read at all.
-The token is checked against the usage endpoint before it is accepted, so a wrong paste is
-reported straight away.
+To stop even that, press **Sign In with Claude** in Settings ▸ Credentials. Your browser opens,
+you authorize once, and ClaudeMeter gets a credential of its own. It goes into a Keychain item
+ClaudeMeter creates and is the sole writer of, so nothing ever resets its permitted list, no dialog
+can arise, and Claude Code's own credential is never read at all. The credential is checked against
+the usage endpoint before the sign-in is called a success, so a problem is reported straight away.
+
+This matters more than it used to. The Claude desktop app runs local Claude Code sessions of its
+own and renews the same shared credential the terminal CLI does — roughly every eight hours — so a
+machine driven from the desktop app hits the eviction on that cadence whether or not a terminal is
+ever opened. Signing in ends it in one click.
+
+Pasting a token from `claude setup-token` still works, behind a disclosure in the same section. It
+is the weaker of the two: a token minted that way carries no refresh token, so when it expires the
+paste has to be repeated, while a browser sign-in renews itself.
 
 **Alerts request permission only when you switch the toggle on.** That is the app's only
 authorisation request, so a default install never raises a system permission prompt. If the request
@@ -482,7 +492,7 @@ The panel shows a notice at the top and adjusts what it trusts. There are four s
 | Sign in again | `Sign in again` | Credentials are present but beyond renewal — the refresh token has expired, been revoked, or was never there. |
 | Not signed in | `Not signed in` | No usable Claude Code credentials in the Keychain. |
 | Waiting for Claude Code | `Waiting for Claude Code` | The stored token has aged out. ClaudeMeter never renews Claude Code's token, because spending it retires the CLI's copy and saving the result locks the CLI out. Run any `claude` command, or give ClaudeMeter a token of its own. |
-| Keychain access needed | `Keychain access needed` | Claude Code rewrote its credential, which reset the item's list of permitted programs. Press *Authorize…*, or set up a dedicated token so it stops happening. |
+| Keychain access needed | `Keychain access needed` | Claude Code rewrote its credential — the terminal CLI or the desktop app, whichever renewed — which reset the item's list of permitted programs. Press *Authorize…*, or sign in from Settings so it stops happening. |
 
 While offline:
 
@@ -573,8 +583,13 @@ from time to time: `claude` renewed its token, which rewrote the item and droppe
 the permitted list. Nothing is broken and nothing needs repairing. Press *Authorize…* in the panel
 and approve once. ClaudeMeter deliberately does not raise that dialog by itself — its reads are
 made with system dialogs suppressed, so a refusal comes back as a value instead of as a modal
-window over whatever you were doing. To stop it recurring at all, give ClaudeMeter a token of its
-own from `claude setup-token` in Settings ▸ Credentials.
+window over whatever you were doing. To stop it recurring at all, press **Sign In with Claude** in
+Settings ▸ Credentials.
+
+Worth knowing if you use the Claude desktop app: it runs local Claude Code sessions and renews the
+same shared credential, so this appears on its renewal cadence — around every eight hours — even
+if you never open a terminal. Your transcripts and the statistics below the notice are read from
+disk and are unaffected either way.
 
 **`Waiting for Claude Code`.** The stored access token has aged out and ClaudeMeter is deliberately
 leaving it alone. Renewing it would spend Claude Code's refresh token, which the endpoint rotates,

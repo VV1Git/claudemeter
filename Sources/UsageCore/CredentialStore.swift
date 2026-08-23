@@ -216,6 +216,33 @@ public actor CredentialStore {
         return resolved
     }
 
+    /// Exchanges an authorization code and adopts the result as this app's own credential.
+    ///
+    /// The sibling of `adoptDedicatedToken`, and the better of the two wherever it can be used:
+    /// what comes back carries a refresh token, so `CredentialPolicy` takes the `.renew` branch
+    /// and the user never has to do this again. A pasted `claude setup-token` token has nothing
+    /// to renew with and eventually expires into `.signInRequired`.
+    ///
+    /// Nothing here touches Claude Code's item — the credential goes into `ownService`, which
+    /// this app is the only writer of, so no partition list is reset and nobody is evicted.
+    @discardableResult
+    public func adoptAuthorizationCode(
+        _ code: AuthorizationCode,
+        verifier: String,
+        redirectURI: String,
+        now: Date = Date()
+    ) async throws -> ResolvedCredential {
+        let tokens = try await refresher.exchange(
+            code, verifier: verifier, redirectURI: redirectURI, now: now)
+        let credentials = OAuthSignIn.credentials(
+            from: tokens, clientID: TokenRefresher.defaultClientID)
+        try Keychain.storeOwnCredentials(credentials)
+        let resolved = ResolvedCredential(credentials: credentials, source: .dedicated)
+        cached = resolved
+        needsAuthorization = false
+        return resolved
+    }
+
     /// A pasted token as it will actually be stored.
     ///
     /// Split out and made `static` so the rule is testable without a Keychain, because the rule

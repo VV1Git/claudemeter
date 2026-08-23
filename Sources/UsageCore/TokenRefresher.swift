@@ -135,15 +135,52 @@ public struct TokenRefresher: Sendable {
             body["scope"] = credentials.scopes.joined(separator: " ")
         }
 
+        let encoded: Data
+        do {
+            encoded = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            throw TokenRefreshError.decoding("Refresh request could not be encoded")
+        }
+
+        let data = try await post(encoded)
+        return try Self.decodeTokens(from: data, refreshedWith: refreshToken, now: now)
+    }
+
+    /// Trades an authorization code for a first pair of tokens.
+    ///
+    /// The other half of `refresh`, and deliberately on the same type: it is the same endpoint,
+    /// the same client and the same response shape, so sharing the transport is what keeps the
+    /// two from drifting apart. What differs is only which grant is being presented.
+    ///
+    /// There is no prior refresh token to carry forward, so a response that omits one decodes to
+    /// an empty string — `OAuthSignIn.credentials(from:clientID:)` reads that as "nothing to
+    /// renew with" and stores nil.
+    public func exchange(
+        _ code: AuthorizationCode,
+        verifier: String,
+        redirectURI: String,
+        clientID: String = defaultClientID,
+        now: Date = Date()
+    ) async throws -> RefreshedTokens {
+        let encoded: Data
+        do {
+            encoded = try OAuthSignIn.exchangeBody(
+                code, verifier: verifier, redirectURI: redirectURI, clientID: clientID)
+        } catch {
+            throw TokenRefreshError.decoding("Exchange request could not be encoded")
+        }
+
+        let data = try await post(encoded)
+        return try Self.decodeTokens(from: data, refreshedWith: "", now: now)
+    }
+
+    /// One POST to the token endpoint, with the status handling both grants share.
+    private func post(_ body: Data) async throws -> Data {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        } catch {
-            throw TokenRefreshError.decoding("Refresh request could not be encoded")
-        }
+        request.httpBody = body
 
         let data: Data
         let response: URLResponse
@@ -159,15 +196,17 @@ public struct TokenRefresher: Sendable {
 
         guard (200...299).contains(http.statusCode) else {
             // 400 and 401 are how this endpoint says the grant itself is no good —
-            // `invalid_grant` for a refresh token that has been revoked or rotated away.
+            // `invalid_grant` for a refresh token that has been revoked or rotated away, or for
+            // an authorization code already spent or past its very short life.
             // Everything else is the server having a bad day and worth another try.
             if http.statusCode == 400 || http.statusCode == 401 {
-                throw TokenRefreshError.rejected(Self.errorDetail(from: data, status: http.statusCode))
+                throw TokenRefreshError.rejected(
+                    Self.errorDetail(from: data, status: http.statusCode))
             }
             throw TokenRefreshError.httpStatus(http.statusCode)
         }
 
-        return try Self.decodeTokens(from: data, refreshedWith: refreshToken, now: now)
+        return data
     }
 
     /// Pure decode, exposed so tests cover the wire shape with no network.

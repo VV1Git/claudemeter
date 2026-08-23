@@ -33,6 +33,13 @@ struct SettingsView: View {
     @State private var dedicatedToken = ""
     @State private var tokenError: String?
     @State private var isAdopting = false
+    /// The `code#state` string from the callback page, on the fallback route where no loopback
+    /// port could be opened. Same reasoning as `dedicatedToken`: it buys a credential, so it
+    /// lives no longer than the sign-in that produced it.
+    @State private var pastedCode = ""
+    /// Held so Cancel can actually stop the wait — cancelling this task is what unblocks the
+    /// loopback listener.
+    @State private var signInTask: Task<Void, Never>?
 
     init() {}
 
@@ -297,19 +304,8 @@ struct SettingsView: View {
                     "ClaudeMeter is using its own token, so it never reads Claude Code\u{2019}s "
                         + "credential and macOS never asks you to authorize anything.")
             } else {
-                HStack(spacing: 8) {
-                    SecureField("sk-ant-oat01-\u{2026}", text: $dedicatedToken)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Use") { adoptToken() }
-                        .disabled(
-                            dedicatedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                || isAdopting)
-                }
-                note(
-                    "Optional, and the only way to stop the Keychain prompts for good. Run "
-                        + "`claude setup-token` in a terminal, then paste the token here. It goes "
-                        + "into ClaudeMeter\u{2019}s own Keychain item \u{2014} Claude Code\u{2019}s is left "
-                        + "untouched, and neither one can evict the other again.")
+                signInControls
+                manualTokenControls
             }
 
             if let tokenError {
@@ -348,11 +344,115 @@ struct SettingsView: View {
         }
     }
 
+    /// The one-click route: a browser sign-in that hands back a credential ClaudeMeter owns and
+    /// can renew, so the Keychain prompts stop for good without a trip to a terminal.
+    @ViewBuilder private var signInControls: some View {
+        switch model?.signInStage ?? .idle {
+        case .idle:
+            Button("Sign In with Claude\u{2026}") { beginSignIn() }
+            note(
+                "The way to stop the Keychain prompts for good. Your browser opens, you "
+                    + "authorize once, and ClaudeMeter gets a credential of its own \u{2014} Claude "
+                    + "Code\u{2019}s is left untouched, so neither one can evict the other again.")
+
+        case .waitingForBrowser:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(verbatim: "Waiting for your browser\u{2026}")
+                    .foregroundStyle(.secondary)
+                Button("Cancel") { cancelSignIn() }
+                    .controlSize(.small)
+            }
+            note("Authorize ClaudeMeter in the tab that just opened. It finishes on its own.")
+
+        case .awaitingPastedCode:
+            // Only reached when no loopback port could be opened, so the browser had to be sent
+            // to the page that displays the code instead of one that comes back by itself.
+            HStack(spacing: 8) {
+                SecureField("Paste the code from the browser", text: $pastedCode)
+                    .textFieldStyle(.roundedBorder)
+                Button("Finish") { finishSignIn() }
+                    .disabled(
+                        pastedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || isAdopting)
+                Button("Cancel") { cancelSignIn() }
+                    .controlSize(.small)
+            }
+            note(
+                "ClaudeMeter could not open a local port for the browser to return to, so the "
+                    + "code has to come back by hand. Copy what the page shows and paste it here.")
+        }
+    }
+
+    /// The older route, kept because it is the one that works when the browser flow cannot be
+    /// completed at all — a machine with no default browser, or an account that has to sign in
+    /// somewhere else. Collapsed by default so it does not compete with the button above.
+    @ViewBuilder private var manualTokenControls: some View {
+        DisclosureGroup("Use a token from `claude setup-token` instead") {
+            HStack(spacing: 8) {
+                SecureField("sk-ant-oat01-\u{2026}", text: $dedicatedToken)
+                    .textFieldStyle(.roundedBorder)
+                Button("Use") { adoptToken() }
+                    .disabled(
+                        dedicatedToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || isAdopting)
+            }
+            note(
+                "Run `claude setup-token` in a terminal and paste the token here. It works, but "
+                    + "it carries nothing to renew itself with, so it has to be redone when it "
+                    + "expires \u{2014} signing in above does not.")
+        }
+        .font(.callout)
+    }
+
     private var repairCommand: String? { model?.partitionRepairCommand }
 
     private func copyRepairCommand(_ command: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(command, forType: .string)
+    }
+
+    /// Opens the browser and waits for the code to come back.
+    private func beginSignIn() {
+        tokenError = nil
+        pastedCode = ""
+        signInTask?.cancel()
+        signInTask = Task {
+            guard let model else {
+                tokenError = "ClaudeMeter is still starting up. Try again in a moment."
+                return
+            }
+            tokenError = await model.signIn()
+            signInTask = nil
+        }
+    }
+
+    /// Finishes the fallback route with the code the user copied out of the browser.
+    private func finishSignIn() {
+        let code = pastedCode
+        isAdopting = true
+        tokenError = nil
+        Task {
+            guard let model else {
+                isAdopting = false
+                tokenError = "ClaudeMeter is still starting up. Try again in a moment."
+                return
+            }
+            let failure = await model.completeSignIn(withPastedCode: code)
+            isAdopting = false
+            tokenError = failure
+            if failure == nil { pastedCode = "" }
+        }
+    }
+
+    /// Cancelling the task is what unblocks a loopback wait; the model call clears the stage so
+    /// the button comes back even on the route where there is no task to cancel.
+    private func cancelSignIn() {
+        signInTask?.cancel()
+        signInTask = nil
+        pastedCode = ""
+        tokenError = nil
+        model?.cancelSignIn()
     }
 
     /// Spends the pasted token on a real request before accepting it, so a token that does not

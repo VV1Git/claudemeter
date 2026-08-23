@@ -830,6 +830,168 @@ import UsageCore
         }
     }
 
+    // MARK: - Signing in
+
+    /// How far along a browser sign-in is, so Settings can show the right control.
+    public enum SignInStage: Equatable, Sendable {
+        case idle
+        /// The browser is open and the loopback port is waiting for it to come back.
+        case waitingForBrowser
+        /// No loopback port could be had, so the browser was sent to the page that displays the
+        /// code, and the user has to bring it back by hand.
+        case awaitingPastedCode
+    }
+
+    public private(set) var signInStage: SignInStage = .idle
+
+    /// The PKCE secret and state for the sign-in in flight. Held only for as long as the flow
+    /// runs: the verifier is what proves this process started the request, so it is discarded
+    /// the moment the code has been spent or the attempt abandoned.
+    private var pendingSignIn: (pkce: PKCEPair, state: String, redirectURI: String)?
+
+    /// Starts a browser sign-in and adopts what comes back as ClaudeMeter's own credential.
+    ///
+    /// This is the path that ends the Keychain prompts without sending the user to a terminal.
+    /// It is the same OAuth exchange `claude setup-token` performs, so what it produces is a
+    /// credential of exactly the shape `CredentialStore` already renews — and better than a
+    /// pasted one, which carries no refresh token and therefore has to be redone when it
+    /// expires.
+    ///
+    /// Returns the error to show, or nil on success. On success the credential lands in this
+    /// app's own Keychain item; Claude Code's is neither read nor written.
+    public func signIn() async -> String? {
+        cancelSignIn()
+
+        let pkce = PKCEPair()
+        let state = OAuthSignIn.makeState()
+
+        // Loopback first, because it is the whole difference between one click and a copy-paste.
+        // A port that cannot be opened is not a failure worth reporting — it is the cue to take
+        // the manual route, which always works.
+        guard let receiver = try? LoopbackCodeReceiver() else {
+            return beginManualSignIn(pkce: pkce, state: state)
+        }
+
+        let redirectURI = OAuthSignIn.loopbackRedirectURI(port: receiver.port)
+        // Deliberately not recorded in `pendingSignIn`: on this route the code comes back to
+        // this process, so there is no second step to hold a verifier for, and state that only
+        // one of two paths reads is state the other path can get wrong.
+        signInStage = .waitingForBrowser
+        NSWorkspace.shared.open(
+            OAuthSignIn.authorizationURL(
+                challenge: pkce.challenge, state: state, redirectURI: redirectURI))
+
+        do {
+            let code = try await receiver.code()
+            try OAuthSignIn.validate(code, expecting: state)
+            return await adopt(code, verifier: pkce.verifier, redirectURI: redirectURI)
+        } catch OAuthSignInError.cancelled {
+            // The user's own doing, so there is nothing to tell them they do not already know.
+            signInStage = .idle
+            pendingSignIn = nil
+            return nil
+        } catch OAuthSignInError.timedOut {
+            // Either the user walked away, or this port was refused as a redirect — which no
+            // amount of waiting fixes. The second is the one worth naming, because the route
+            // that does not need a port is right there and the user would not otherwise think
+            // to try it.
+            signInStage = .idle
+            pendingSignIn = nil
+            return "The browser did not come back. Try again \u{2014} or, if it keeps happening, use "
+                + "a token from `claude setup-token` below, which needs no local port."
+        } catch {
+            signInStage = .idle
+            pendingSignIn = nil
+            return message(for: error)
+        }
+    }
+
+    /// Sends the browser to the page that displays the code, for the user to bring back.
+    ///
+    /// Always returns nil: reaching this point is not an error the user needs to hear about,
+    /// only a different set of instructions, which `signInStage` is what conveys.
+    private func beginManualSignIn(pkce: PKCEPair, state: String) -> String? {
+        pendingSignIn = (pkce, state, OAuthSignIn.manualRedirectURI)
+        signInStage = .awaitingPastedCode
+        NSWorkspace.shared.open(
+            OAuthSignIn.authorizationURL(
+                challenge: pkce.challenge,
+                state: state,
+                redirectURI: OAuthSignIn.manualRedirectURI))
+        return nil
+    }
+
+    /// Finishes a sign-in with the `code#state` string the callback page displayed.
+    public func completeSignIn(withPastedCode pasted: String) async -> String? {
+        guard let pending = pendingSignIn else {
+            return "That sign-in is no longer in progress. Start a new one."
+        }
+        do {
+            let code = try OAuthSignIn.parsePastedCode(pasted)
+            try OAuthSignIn.validate(code, expecting: pending.state)
+            return await adopt(
+                code, verifier: pending.pkce.verifier, redirectURI: pending.redirectURI)
+        } catch {
+            return message(for: error)
+        }
+    }
+
+    /// Spends the code, stores what comes back, and proves it works before calling it a success.
+    ///
+    /// The validating poll is the same belt-and-braces `adoptDedicatedToken` applies, and for the
+    /// same reason: a credential that the usage endpoint will not accept should be reported while
+    /// the user is still in Settings, not silently at the next poll. A scope set that turns out
+    /// too narrow would surface exactly here.
+    private func adopt(
+        _ code: AuthorizationCode, verifier: String, redirectURI: String
+    ) async -> String? {
+        let stored: ResolvedCredential
+        do {
+            stored = try await credentials.adoptAuthorizationCode(
+                code, verifier: verifier, redirectURI: redirectURI)
+        } catch {
+            signInStage = .idle
+            pendingSignIn = nil
+            return message(for: error)
+        }
+
+        signInStage = .idle
+        pendingSignIn = nil
+        hasDedicatedToken = await credentials.hasDedicatedToken()
+
+        do {
+            let fresh = try await client.fetch(
+                accessToken: stored.credentials.accessToken, now: Date())
+            apply(fresh, now: Date())
+            noteCleanPoll()
+            return nil
+        } catch let error as LimitsClientError {
+            // Only an outright refusal is worth undoing. A transport failure says nothing about
+            // the credential, and discarding a good one because the network blinked would send
+            // the user back through the browser for no reason.
+            if case .unauthorized = error {
+                await credentials.forgetDedicatedToken()
+                hasDedicatedToken = await credentials.hasDedicatedToken()
+                return "The endpoint refused the credential that sign-in produced \u{2014} usually "
+                    + "the scopes it was granted. Nothing is lost: ClaudeMeter has gone back to "
+                    + "reading Claude Code\u{2019}s credential."
+            }
+            return error.description
+        } catch {
+            return message(for: error)
+        }
+    }
+
+    /// Abandons a sign-in, discarding the verifier with it.
+    ///
+    /// Only clears this model's state. A loopback wait is unblocked by cancelling the task that
+    /// is awaiting `signIn()`, which is the caller's to hold — an `AppModel` that owned the task
+    /// as well would have two owners for one cancellation and no way to order them.
+    public func cancelSignIn() {
+        pendingSignIn = nil
+        signInStage = .idle
+    }
+
     // MARK: - The dedicated token
 
     /// True when the user has given ClaudeMeter a token of its own, so the panel can say which

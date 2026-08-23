@@ -8,7 +8,8 @@ hit ratio, and equivalent cost at published API rates.
 It is a menu bar item and nothing else. `LSUIElement` is set in `Packaging/Info.plist`, so there is
 no Dock icon and no app-switcher entry, with one deliberate exception while the settings window is
 open. There are no third-party dependencies: `Package.swift` declares none. The code is split into
-two targets — `UsageCore`, which imports only Foundation and Security and holds every decision worth testing,
+two targets — `UsageCore`, which imports only Foundation, Security and CryptoKit and holds every decision
+worth testing,
 and `ClaudeMeter`, the SwiftUI and AppKit shell around it.
 
 ## What it shows
@@ -74,7 +75,7 @@ Menu bar format; the idle gap that separates one stretch of work from the next (
 default 10) with a live wall-clock readout; the poll cadence to aim for (90 s to 15 min, default 3
 min) alongside the effective one whenever a rate limit has widened it; the notification toggle and
 threshold (50% to 99%, default 90); launch at login via `SMAppService`; an optional token of
-ClaudeMeter's own from `claude setup-token`, which removes the Keychain prompts entirely (see
+ClaudeMeter's own, obtained by signing in from Settings, which removes the Keychain prompts entirely (see
 [The credential model](#the-credential-model)); and a footer naming the support directory and
 restating where the OAuth token goes.
 
@@ -267,13 +268,56 @@ changed" is answered by reading `kSecAttrModificationDate`, an attributes-only q
 nothing, needs no authorization and cannot raise a dialog. Steady state is zero decrypting reads
 for as long as a token lives, while a rotation by the CLI is still noticed within one poll.
 
-### A token of its own
+### A credential of its own
 
-To avoid the prompts entirely, Settings ▸ Credentials accepts a token from `claude setup-token`.
-It is stored in `com.claudemeter.ClaudeMeter-credentials`, an item ClaudeMeter creates and is the
-sole writer of, so nothing else on the machine ever resets its permitted list. With one set,
-Claude Code's item is not read at all and no dialog can arise. The token is spent on a real request
-before it is accepted, so a bad paste is reported immediately rather than at the next poll.
+To avoid the prompts entirely, Settings ▸ Credentials offers **Sign In with Claude**. It runs the
+authorization-code half of Claude Code's own OAuth flow — the same one `claude setup-token`
+performs — from inside the app: a PKCE pair is generated, the browser opens at
+`platform.claude.com/oauth/authorize`, and the code comes back to a listener this app opened on
+`127.0.0.1`. `OAuthSignIn` holds the pure half of that (the challenge, the URL, the two shapes a
+code arrives in, the exchange body); `LoopbackCodeReceiver` is the socket.
+
+Every constant in it — endpoint, client identifier, redirect, request shape — was read out of the
+shipped CLI rather than guessed, so what the flow produces is the same shape the CLI's own login
+produces.
+
+One of those constants is load-bearing in a way that is not obvious, and got this wrong twice. The
+CLI carries *two* authorization endpoints and picks between them:
+
+```js
+let u = loginWithClaudeAi ? CLAUDE_AI_AUTHORIZE_URL : CONSOLE_AUTHORIZE_URL
+//        https://claude.com/cai/oauth/authorize    https://platform.claude.com/oauth/authorize
+```
+
+They mint tokens against different things: Console is API billing, the other is a Claude
+subscription. `/api/oauth/usage` reports the rate limits of a *subscription*, so a Console token
+has nothing for it to report and it answers 401 — while the sign-in and the exchange both succeed,
+so nothing looks wrong until the last step. ClaudeMeter uses the subscription endpoint, and
+`OAuthSignInTests` pins it.
+
+The scopes are the CLI's login set with `org:create_api_key` dropped, matching what the credential
+Claude Code writes actually carries — a set observably accepted by the usage endpoint. That is
+deliberately copied rather than reasoned about: the first attempt narrowed it to
+`user:inference user:profile` on the grounds that a read-only meter needs no more, which was both
+wrong and, as it turned out, not the cause of anything.
+
+The result is stored in `com.claudemeter.ClaudeMeter-credentials`, an item ClaudeMeter creates and
+is the sole writer of, so nothing else on the machine ever resets its permitted list. With one set,
+Claude Code's item is not read at all and no dialog can arise. The credential is spent on a real
+request before the sign-in is called a success, so one the usage endpoint will not accept is
+reported while the user is still in Settings.
+
+The browser flow is preferred over the older paste-a-token route — still there, behind a
+disclosure — for one reason beyond convenience: the exchange returns a **refresh token**. A
+`claude setup-token` token has none, so it eventually expires into `.signInRequired` and has to be
+done again; this one renews itself for as long as the grant stands.
+
+`LoopbackCodeReceiver` is built on BSD sockets rather than `NWListener`, which was tried first and
+failed to bind at all — `EINVAL` from every parameter combination, signed or not, sandboxed or
+not. Sockets also keep it in `UsageCore` behind nothing but Foundation, which is what lets the
+accept loop be tested against a real connection rather than only its parser. When no port can be
+had, the flow falls back to the redirect that displays the code for the user to paste, so a machine
+that will not lend a port is slower to sign in rather than unable to.
 
 A dedicated credential is also the one ClaudeMeter *may* renew: `TokenRefresher` posts its refresh
 token to `platform.claude.com/v1/oauth/token` with Claude Code's own client identifier and the

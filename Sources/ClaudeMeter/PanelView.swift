@@ -1005,10 +1005,16 @@ struct PanelView: View {
             return notice(
                 symbol: "lock",
                 title: "Keychain access needed",
-                detail: "Claude Code rewrote its credential, which resets the list of programs "
-                    + "macOS lets read it. Authorize ClaudeMeter once to carry on — or give it a "
-                    + "token of its own in Settings, which stops this happening at all. The "
-                    + "statistics below come from your local transcripts and are unaffected.",
+                // Naming the desktop app matters: a user who has stopped running `claude` in a
+                // terminal has no reason to connect this to Claude Code at all, and would read
+                // an unexplained dialog as ClaudeMeter being broken. Whichever one renewed, the
+                // renewal is roughly eight-hourly, so authorizing only buys until the next one.
+                detail: "Claude Code rewrote its credential — the terminal CLI or the Claude "
+                    + "desktop app, whichever renewed the token — and that resets the list of "
+                    + "programs macOS lets read it. Authorize ClaudeMeter to carry on until the "
+                    + "next renewal, or sign in from Settings to give it a credential of its own "
+                    + "and stop this for good. The statistics below come from your local "
+                    + "transcripts and are unaffected.",
                 tint: SeverityStyle.color(.warning),
                 action: HealthNotice.Notice.Action(title: "Authorize…") {
                     Task { await model.authorizeKeychain() }
