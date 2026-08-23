@@ -13,6 +13,11 @@ import SwiftUI
 struct PanelSection<Content: View>: View {
     let title: String
     @Binding var isExpanded: Bool
+    /// What the section comes to, shown against the right edge of the header.
+    ///
+    /// On the header rather than inside the content so it survives the section being collapsed,
+    /// which is the state a reader who only wants the figure will leave it in.
+    var total: String? = nil
     @ViewBuilder let content: () -> Content
 
     /// Short on purpose. The panel resizes — and in the two-column case the window resizes with it —
@@ -46,7 +51,18 @@ struct PanelSection<Content: View>: View {
                         .foregroundStyle(.secondary)
 
                     // Claims the rest of the row so the target reaches the panel edge.
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 4)
+
+                    if let total {
+                        // Not uppercased with the title: this is a quantity, and small caps make
+                        // a number read as ornament. Monospaced digits so a figure that ticks up
+                        // while the panel is open does not shuffle the ones beside it.
+                        Text(verbatim: total)
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
                 // Without this the transparent space the `Spacer` created is not hit-testable, and
                 // the row would still only respond over the glyphs.

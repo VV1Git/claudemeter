@@ -519,7 +519,10 @@ struct PanelView: View {
     /// month of bars plus four proportion groups. In the wide layout it owns the second column.
     @ViewBuilder private var dailySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PanelSection(title: "Last 30 days", isExpanded: $expandedDaily) {
+            PanelSection(
+                title: "Last 30 days", isExpanded: $expandedDaily,
+                total: model.daily.isEmpty ? nil : Self.figure(dailyTotal)
+            ) {
                 VStack(alignment: .leading, spacing: 10) {
                     if model.daily.isEmpty, model.isScanning {
                         note("Reading transcripts…")
@@ -530,15 +533,19 @@ struct PanelView: View {
                     // `Aggregates.modelSplit` / `effortSplit` run over every cached event, and a
                     // split silently attributed to the section header would overstate its window.
                     if !modelRows.isEmpty {
-                        subLabel("Models · all recorded")
+                        subLabel("Models · all recorded", total: Self.figure(modelTotal))
                         ShareRowsView(rows: modelRows)
                     }
                     if !effortRows.isEmpty {
-                        subLabel("Effort · all recorded")
+                        subLabel("Effort · all recorded", total: Self.figure(effortTotal))
                         ShareRowsView(rows: effortRows)
                     }
                     if !tokenRows.isEmpty {
-                        subLabel("Tokens · all recorded")
+                        // The same total as the models heading, by construction — both are every
+                        // token recorded, split two different ways.
+                        subLabel(
+                            "Tokens · all recorded",
+                            total: UsageNumberFormat.tokens(tokenTotals.total))
                         ShareRowsView(rows: tokenRows)
                         // Without this the split invites the wrong conclusion. Cache reads
                         // dominate the token count but bill at a tenth of the input rate, while
@@ -547,7 +554,9 @@ struct PanelView: View {
                         note("Output is a small share of tokens and a large share of cost.")
                     }
                     if !costRows.isEmpty {
-                        subLabel("Cost share · all recorded")
+                        subLabel(
+                            "Cost share · all recorded",
+                            total: UsageNumberFormat.cost(Breakdown.fieldCosts(models: model.models).total))
                         ShareRowsView(rows: costRows)
                     }
                 }
@@ -561,6 +570,16 @@ struct PanelView: View {
 
     /// Fractions are taken over *every* model, not just the rows shown, so a truncated list
     /// cannot imply the top few account for everything.
+    /// Totals for the headings. Taken from `Breakdown` rather than reduced here, so the figure
+    /// above the rows and the figures in them cannot come from two different expressions.
+    private var modelTotal: SplitTotal { Breakdown.total(models: model.models) }
+    private var effortTotal: SplitTotal { Breakdown.total(efforts: model.efforts) }
+    private var dailyTotal: SplitTotal { Breakdown.total(daily: model.daily) }
+
+    /// The bar stays proportional to *tokens*, which is what the section is headed by; the cost
+    /// rides alongside as text. Pricing the bar instead would make it disagree with the "Tokens"
+    /// split directly beneath it, and the two orderings barely resemble each other — output is a
+    /// rounding error by volume and a large share of cost.
     private var modelRows: [ShareRow] {
         let total = model.models.reduce(0) { $0 + $1.tokens.total }
         guard total > 0 else { return [] }
@@ -568,7 +587,7 @@ struct PanelView: View {
             ShareRow(
                 id: "model-\(usage.model)",
                 label: usage.displayName,
-                detail: UsageNumberFormat.tokens(usage.tokens.total),
+                detail: Self.figure(tokens: usage.tokens, cost: usage.costEquivalent),
                 fraction: Double(usage.tokens.total) / Double(total))
         }
     }
@@ -745,7 +764,12 @@ struct PanelView: View {
             // three collapsed stats headers keep the same rhythm as the collapsed section headers
             // directly above them in `lightSections`.
             VStack(alignment: .leading, spacing: 8) {
-                PanelSection(title: "Today", isExpanded: $expandedToday) {
+                PanelSection(
+                    title: "Today", isExpanded: $expandedToday,
+                    total: model.today.map {
+                        Self.figure(tokens: $0.tokens, cost: $0.costEquivalent)
+                    }
+                ) {
                     grid(columns: 2) {
                         StatTile(
                             label: "Tokens in",
@@ -776,7 +800,12 @@ struct PanelView: View {
                     }
                 }
 
-                PanelSection(title: "All recorded activity", isExpanded: $expandedAllRecorded) {
+                PanelSection(
+                    title: "All recorded activity", isExpanded: $expandedAllRecorded,
+                    // The same corpus the breakdowns above split, so the two agree by
+                    // construction rather than by coincidence.
+                    total: model.models.isEmpty ? nil : Self.figure(modelTotal)
+                ) {
                     grid {
                         StatTile(
                             label: "Cache hit",
@@ -1110,6 +1139,37 @@ struct PanelView: View {
             .font(.caption2)
             .textCase(.uppercase)
             .foregroundStyle(.tertiary)
+    }
+
+    /// A sub-heading with what the rows beneath it come to, set against the right edge.
+    ///
+    /// The total is deliberately not uppercased with the label: it is a quantity, and
+    /// `2.0B · ~$4.2k` in small caps reads as decoration rather than as a figure. It is also a
+    /// shade less recessive than the label, because the label names the section and the number
+    /// is the thing worth reading.
+    private func subLabel(_ text: String, total: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            subLabel(text)
+            if let total {
+                Spacer(minLength: 4)
+                Text(verbatim: total)
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    /// `1.2B · ~$2.5k`, or just the tokens when there is no cost to show.
+    private static func figure(tokens: TokenCounts, cost: Double?) -> String {
+        let count = UsageNumberFormat.tokens(tokens.total)
+        guard let cost else { return count }
+        return "\(count) · \(UsageNumberFormat.cost(cost))"
+    }
+
+    private static func figure(_ total: SplitTotal) -> String {
+        figure(tokens: total.tokens, cost: total.cost)
     }
 
     private func note(_ text: String) -> some View {
