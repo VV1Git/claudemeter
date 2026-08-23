@@ -105,7 +105,7 @@ private struct ShareBar: View {
 /// exposes raw counts and dollars — its one formatter, `MenuBarLabelText`, renders the menu bar
 /// string and a countdown to a future date, neither of which is any of these. Every figure here
 /// is approximate by construction: token totals are abbreviated and costs are equivalents at
-/// published API rates, marked with `~`.
+/// published API rates.
 enum UsageNumberFormat {
     /// `842`, `12.4K`, `1.4M`, `2B` — abbreviated so a 30-day total fits an axis label.
     static func tokens(_ count: Int) -> String {
@@ -127,15 +127,16 @@ enum UsageNumberFormat {
         return text + suffix
     }
 
-    /// Cost equivalent, always tilde-prefixed: these are list-price equivalents for
-    /// subscription usage that was never billed per token.
+    /// Cost equivalent: a list-price figure for subscription usage that was never billed per
+    /// token. Written plainly — the surrounding labels and help text already say it is an
+    /// equivalent, so a marker on every figure only adds noise.
     static func cost(_ dollars: Double) -> String {
         let value = max(0, dollars)
-        if value == 0 { return "~$0" }
+        if value == 0 { return "$0" }
         if value < 0.01 { return "<$0.01" }
-        if value < 10 { return String(format: "~$%.2f", value) }
-        if value < 10_000 { return String(format: "~$%.0f", value) }
-        return String(format: "~$%.1fk", value / 1_000)
+        if value < 10 { return String(format: "$%.2f", value) }
+        if value < 10_000 { return String(format: "$%.0f", value) }
+        return String(format: "$%.1fk", value / 1_000)
     }
 
     /// A 0…1 share as an integer percentage, floored at `<1%` so a non-zero bucket never

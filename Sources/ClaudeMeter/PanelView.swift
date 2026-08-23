@@ -862,8 +862,8 @@ struct PanelView: View {
     }
 
     /// Both hour figures are inferences, not measurements — the transcripts carry no durations,
-    /// so these are clustered message timestamps — hence the `~`, the same marker the cost
-    /// equivalent carries. `<1m` is already an approximation and is left alone.
+    /// so these are clustered message timestamps — hence the `~`. `<1m` is already an
+    /// approximation and is left alone.
     private var wallClockText: String {
         guard let hours = model.usageHours else { return "—" }
         return approximate(hours.wallClock)
@@ -1144,7 +1144,7 @@ struct PanelView: View {
     /// A sub-heading with what the rows beneath it come to, set against the right edge.
     ///
     /// The total is deliberately not uppercased with the label: it is a quantity, and
-    /// `2.0B · ~$4.2k` in small caps reads as decoration rather than as a figure. It is also a
+    /// `2.0B · $4.2k` in small caps reads as decoration rather than as a figure. It is also a
     /// shade less recessive than the label, because the label names the section and the number
     /// is the thing worth reading.
     private func subLabel(_ text: String, total: String?) -> some View {
@@ -1161,7 +1161,7 @@ struct PanelView: View {
         }
     }
 
-    /// `1.2B · ~$2.5k`, or just the tokens when there is no cost to show.
+    /// `1.2B · $2.5k`, or just the tokens when there is no cost to show.
     private static func figure(tokens: TokenCounts, cost: Double?) -> String {
         let count = UsageNumberFormat.tokens(tokens.total)
         guard let cost else { return count }
