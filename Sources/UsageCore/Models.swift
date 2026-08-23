@@ -473,13 +473,21 @@ public struct EffortUsage: Sendable, Equatable, Identifiable {
     public let effort: String?
     public let messageCount: Int
     public let tokens: TokenCounts
+    /// What this effort level's requests would have cost at published API rates.
+    ///
+    /// Rates do not vary by effort, but every request carries a model as well as an effort, so
+    /// each one has a price — pooled here by effort instead of by model. Higher effort spends
+    /// more output tokens per request and output is the dearest field, so this says something
+    /// the token count alone does not.
+    public let costEquivalent: Double
 
     public var id: String { effort ?? "—" }
 
-    public init(effort: String?, messageCount: Int, tokens: TokenCounts) {
+    public init(effort: String?, messageCount: Int, tokens: TokenCounts, costEquivalent: Double) {
         self.effort = effort
         self.messageCount = messageCount
         self.tokens = tokens
+        self.costEquivalent = costEquivalent
     }
 }
 

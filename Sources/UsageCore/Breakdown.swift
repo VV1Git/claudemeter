@@ -3,9 +3,9 @@ import Foundation
 /// The figure a breakdown's heading carries: what every row beneath it adds up to.
 public struct SplitTotal: Sendable, Equatable {
     public let tokens: TokenCounts
-    /// `nil` when the split has nothing priced to report. The effort split is the case: it
-    /// pools by reasoning effort, which pricing does not vary on, so there is no per-effort
-    /// cost to sum and a `0` here would read as free rather than as unknown.
+    /// `nil` when the split has nothing priced to report, so an unpriced heading cannot read as
+    /// free. Every split has a cost today; the case remains representable because a split that
+    /// cannot be priced is a real possibility, not because one of them is.
     public let cost: Double?
 
     public init(tokens: TokenCounts, cost: Double?) {
@@ -37,11 +37,12 @@ public enum Breakdown {
             cost: models.reduce(0) { $0 + $1.costEquivalent })
     }
 
-    /// Totals for the effort split. Tokens only — see `SplitTotal.cost`.
+    /// Totals for the effort split. Same events as the model split, pooled by effort instead —
+    /// so this cost and `total(models:)`'s are the same number reached two ways.
     public static func total(efforts: [EffortUsage]) -> SplitTotal {
         SplitTotal(
             tokens: efforts.reduce(TokenCounts.zero) { $0 + $1.tokens },
-            cost: nil)
+            cost: efforts.reduce(0) { $0 + $1.costEquivalent })
     }
 
     /// Totals for the daily bars, so the section can say what the thirty days come to rather

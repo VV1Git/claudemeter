@@ -247,15 +247,23 @@ public enum Aggregates {
 
     /// Per-effort totals. Requests that carried no `effort` field form their own bucket keyed by
     /// `nil` rather than being folded into a default level — "unset" is not an effort setting.
+    ///
+    /// Priced per event at that event's own model and timestamp, exactly as `modelSplit` does —
+    /// so the two splits, which run over the same events, come to the same total cost.
     public static func effortSplit(from events: [UsageEvent]) -> [EffortUsage] {
         var tokens: [String?: TokenCounts] = [:]
         var counts: [String?: Int] = [:]
+        var costs: [String?: Double] = [:]
         for event in events {
             tokens[event.effort, default: .zero] += event.tokens
             counts[event.effort, default: 0] += 1
+            costs[event.effort, default: 0] += Pricing.cost(
+                event.tokens, model: event.model, on: event.timestamp)
         }
         return tokens.map { effort, counted in
-            EffortUsage(effort: effort, messageCount: counts[effort] ?? 0, tokens: counted)
+            EffortUsage(
+                effort: effort, messageCount: counts[effort] ?? 0, tokens: counted,
+                costEquivalent: costs[effort] ?? 0)
         }
         .sorted { lhs, rhs in
             if lhs.tokens.total != rhs.tokens.total { return lhs.tokens.total > rhs.tokens.total }

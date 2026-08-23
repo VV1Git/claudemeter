@@ -418,6 +418,29 @@ private func newYorkCalendar() throws -> Calendar { try calendar("America/New_Yo
     #expect(xhigh.tokens.input == 1_000)
 }
 
+@Test func theEffortSplitPricesTheSameSpendAsTheModelSplit() throws {
+    // The panel stacks the two headings a few rows apart, over the same events pooled two ways.
+    // Different totals there would be visible and wrong, so they are priced by the same rule.
+    let t0 = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
+    let events = [
+        makeEvent(
+            at: t0, model: "claude-opus-5", effort: "high",
+            tokens: TokenCounts(input: 1_000, output: 500)),
+        makeEvent(
+            at: t0 + minutes(1), model: "claude-sonnet-5", effort: "high",
+            tokens: TokenCounts(input: 2_000, cacheRead: 9_000)),
+        makeEvent(
+            at: t0 + minutes(2), model: "claude-sonnet-5", effort: nil,
+            tokens: TokenCounts(input: 400, output: 80)),
+    ]
+
+    let byEffort = Aggregates.effortSplit(from: events).reduce(0) { $0 + $1.costEquivalent }
+    let byModel = Aggregates.modelSplit(from: events, now: t0 + minutes(5))
+        .reduce(0) { $0 + $1.costEquivalent }
+    #expect(byEffort > 0)
+    #expect(abs(byEffort - byModel) < 1e-9)
+}
+
 @Test func tokensSinceIncludesTheBoundaryAndExcludesEarlierEvents() throws {
     let cutoff = try #require(ISO8601.date(from: "2026-01-15T12:00:00.000Z"))
     let events = [

@@ -85,16 +85,17 @@ private let sonnet = ModelUsage(
 
 // MARK: - Effort
 
-@Test func theEffortTotalReportsNoCost() {
-    // Pricing does not vary by reasoning effort, so there is nothing to sum. Zero would read as
-    // free; absent reads as "not a question this split answers".
+@Test func theEffortTotalIsTheSumOfTheRows() {
     let total = Breakdown.total(efforts: [
-        EffortUsage(effort: "high", messageCount: 3, tokens: counts(input: 100, output: 200)),
-        EffortUsage(effort: nil, messageCount: 1, tokens: counts(input: 50)),
+        EffortUsage(
+            effort: "high", messageCount: 3, tokens: counts(input: 100, output: 200),
+            costEquivalent: 1.5),
+        EffortUsage(
+            effort: nil, messageCount: 1, tokens: counts(input: 50), costEquivalent: 0.25),
     ])
     #expect(total.tokens.input == 150)
     #expect(total.tokens.output == 200)
-    #expect(total.cost == nil)
+    #expect(total.cost == 1.75)
 }
 
 // MARK: - Daily
@@ -118,6 +119,7 @@ private let sonnet = ModelUsage(
     #expect(Breakdown.total(models: []).tokens == .zero)
     #expect(Breakdown.total(models: []).cost == 0)
     #expect(Breakdown.total(efforts: []).tokens == .zero)
+    #expect(Breakdown.total(efforts: []).cost == 0)
     #expect(Breakdown.total(daily: []).tokens == .zero)
     #expect(Breakdown.fieldCosts(models: []) == .zero)
 }

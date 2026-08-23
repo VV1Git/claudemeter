@@ -599,7 +599,7 @@ struct PanelView: View {
             ShareRow(
                 id: "effort-\(usage.id)",
                 label: usage.effort?.capitalized ?? "Unset",
-                detail: UsageNumberFormat.tokens(usage.tokens.total),
+                detail: Self.figure(tokens: usage.tokens, cost: usage.costEquivalent),
                 fraction: Double(usage.tokens.total) / Double(total))
         }
     }
