@@ -269,7 +269,7 @@ import UsageCore
     public var sevenDaySeverity: Severity { snapshot?.severity(for: .sevenDay) ?? .normal }
 
     /// Whether the menu bar ring should carry its cap dot.
-    public var showsCapDot: Bool { fiveHourProjection?.willCapEarly ?? false }
+    public var showsCapDot: Bool { sevenDayProjection?.willCapEarly ?? false }
 
     /// Today's bucket from the 30-day series, for the stats grid.
     public var today: DailyStat? { daily.last }

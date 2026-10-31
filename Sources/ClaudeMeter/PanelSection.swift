@@ -73,8 +73,9 @@ struct PanelSection<Content: View>: View {
             .accessibilityHint(isExpanded ? "Collapses this section" : "Expands this section")
 
             if isExpanded {
+                // 8 rather than 4: a chart's top axis label read as part of the header at 4.
                 content()
-                    .padding(.top, 4)
+                    .padding(.top, 8)
             }
         }
     }

@@ -65,8 +65,10 @@ private struct MenuBarLabel: View {
         // instead of just redrawing it.
         _ = colorScheme
 
-        let window = model.snapshot?.fiveHour
-        let projection = model.fiveHourProjection
+        // The weekly window, not the 5-hour one. Ultra accounts stopped reporting a 5-hour window
+        // on 30 October 2026, and the weekly cap is the one every plan still runs into.
+        let window = model.snapshot?.sevenDay
+        let projection = model.sevenDayProjection
         let text = MenuBarLabelText.text(
             format: format,
             percent: window?.utilization,
@@ -82,7 +84,7 @@ private struct MenuBarLabel: View {
             // screenshot tells you.
             Image(nsImage: MenuBarIcon.image(
                 percent: window?.utilization,
-                severity: model.snapshot?.severity(for: .fiveHour) ?? .normal,
+                severity: model.snapshot?.severity(for: .sevenDay) ?? .normal,
                 showsCapDot: projection?.willCapEarly ?? false,
                 badge: status?.symbol
             ))

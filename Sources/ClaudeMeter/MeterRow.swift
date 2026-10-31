@@ -300,7 +300,14 @@ struct MeterRow: View {
 
         // Three is what the row's width takes. They are ordered most-explanatory first, so a
         // fourth clause is always the least informative one present.
-        return clauses.isEmpty ? nil : clauses.prefix(3).joined(separator: " · ")
+        // Spaces inside a clause are non-breaking, so the line wraps only at a ` · ` and a clause
+        // never splits. Left alone, "busy now ×4.0" broke before its multiplier and stranded
+        // `×4.0` on a line of its own.
+        return clauses.isEmpty
+            ? nil
+            : clauses.prefix(3)
+                .map { $0.replacingOccurrences(of: " ", with: "\u{00A0}") }
+                .joined(separator: " · ")
     }
 
     /// One decimal, because the multiplier's whole range is 0.2 to 4 and rounding it to whole

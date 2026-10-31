@@ -43,6 +43,24 @@ struct PanelView: View {
     /// `Prefs.panelWide`.
     @AppStorage(Prefs.panelWide) private var isWide = Prefs.Default.panelWide
 
+    /// Which sections Settings has left on. Hidden sections are dropped outright, header and all.
+    @AppStorage(Prefs.PanelSectionKind.fiveHourChart.visibilityKey) private var showFiveHourChart =
+        Prefs.Default.sectionVisible
+    @AppStorage(Prefs.PanelSectionKind.weeklyChart.visibilityKey) private var showWeeklyChart =
+        Prefs.Default.sectionVisible
+    @AppStorage(Prefs.PanelSectionKind.sessions.visibilityKey) private var showSessions =
+        Prefs.Default.sectionVisible
+    @AppStorage(Prefs.PanelSectionKind.hours.visibilityKey) private var showHours =
+        Prefs.Default.sectionVisible
+    @AppStorage(Prefs.PanelSectionKind.daily.visibilityKey) private var showDaily =
+        Prefs.Default.sectionVisible
+    @AppStorage(Prefs.PanelSectionKind.today.visibilityKey) private var showToday =
+        Prefs.Default.sectionVisible
+    @AppStorage(Prefs.PanelSectionKind.allRecorded.visibilityKey) private var showAllRecorded =
+        Prefs.Default.sectionVisible
+    @AppStorage(Prefs.PanelSectionKind.headroom.visibilityKey) private var showHeadroom =
+        Prefs.Default.sectionVisible
+
     /// Drives every countdown and the "updated Ns ago" line. Ticked into state rather than read
     /// inline so all the relative strings in one pass of the body agree with each other.
     @State private var now = Date()
@@ -354,7 +372,10 @@ struct PanelView: View {
                         .background(heightProbe { ColumnHeights(leading: $0) })
 
                     // Narrow, the breakdown simply carries on down the same column.
-                    if !isWide {
+                    // Left out entirely when hidden, not drawn empty: an empty block still takes a
+                    // spacing slot in this stack. Its height probe goes with it, and the
+                    // preference falls back to a zero daily height, which keeps the panel narrow.
+                    if !isWide, showDaily {
                         Divider()
                         dailySection
                     }
@@ -389,11 +410,37 @@ struct PanelView: View {
         // Not gated on `isLive`. Recent sessions and the daily chart are derived from the local
         // transcripts, so an API outage says nothing about them — they are as live as ever. Only
         // the sparkline is built from poll samples, and it hides itself when it has none.
-        Divider()
-        lightSections
+        // Each divider travels with the block it introduces, so a block whose sections are all
+        // hidden in Settings leaves no empty strip between two rules.
+        if showsLightSections {
+            Divider()
+            lightSections
+        }
 
-        Divider()
-        stats
+        if showsStats {
+            Divider()
+            stats
+        }
+    }
+
+    /// Whether any of `lightSections` will draw. Mirrors the conditions inside it.
+    private var showsLightSections: Bool {
+        let charts = !model.samples.isEmpty
+            && (showWeeklyChart || (showFiveHourChart && model.fiveHourPercent != nil))
+        return charts || showSessions || showHours
+    }
+
+    /// Whether `stats` will draw. With no events it shows its own "reading" or "nothing found"
+    /// note, which is worth a divider whatever is hidden.
+    private var showsStats: Bool {
+        model.eventCount == 0 || showToday || showAllRecorded || showsHeadroom
+    }
+
+    /// The headroom group's own gate, shared so `showsStats` cannot disagree with it.
+    private var showsHeadroom: Bool {
+        showHeadroom
+            && ((model.fiveHourCalibration != nil && model.fiveHourPercent != nil)
+                || model.sevenDayCalibration != nil || model.cyclePace != nil)
     }
 
     private func column<Content: View>(@ViewBuilder _ body: () -> Content) -> some View {
@@ -405,13 +452,15 @@ struct PanelView: View {
 
     @ViewBuilder private var meters: some View {
         VStack(alignment: .leading, spacing: 12) {
-            MeterRow(
-                title: WindowKind.fiveHour.longLabel,
-                percent: model.fiveHourPercent,
-                severity: model.fiveHourSeverity,
-                resetsAt: model.fiveHourResetsAt,
-                projection: liveProjection(model.fiveHourProjection),
-                now: now)
+            if showsFiveHour {
+                MeterRow(
+                    title: WindowKind.fiveHour.longLabel,
+                    percent: model.fiveHourPercent,
+                    severity: model.fiveHourSeverity,
+                    resetsAt: model.fiveHourResetsAt,
+                    projection: liveProjection(model.fiveHourProjection),
+                    now: now)
+            }
 
             MeterRow(
                 title: WindowKind.sevenDay.longLabel,
@@ -442,6 +491,13 @@ struct PanelView: View {
         model.snapshot != nil || isLive
     }
 
+    /// Whether the account still has a 5-hour window at all. Verified Ultra accounts stopped
+    /// reporting one on 30 October 2026, and a meter that can only ever read `—` is noise. Before
+    /// the first reading there is nothing to go on, so the row stays as the placeholder it was.
+    private var showsFiveHour: Bool {
+        model.snapshot == nil || model.fiveHourPercent != nil
+    }
+
     /// A cached percentage is still a reading that was true at a stated time; a cached projection
     /// is a forecast from a rate nobody is measuring any more, aimed at a reset that may already
     /// have passed. So the percentages stay greyed and the projection goes away entirely, which
@@ -465,14 +521,17 @@ struct PanelView: View {
                 // already wrong on both counts — the old domain reached across turnovers and
                 // measured 6.93 hours. Built from `longLabel` so they cannot drift from the
                 // meter rows directly above, which read "5-hour" and "Weekly".
-                PanelSection(
-                    title: "\(WindowKind.fiveHour.longLabel) window", isExpanded: $expandedFiveHour
-                ) {
-                    SparklineView(
-                        samples: model.samples, kind: .fiveHour,
-                        resetsAt: model.fiveHourResetsAt,
-                        projection: liveProjection(model.fiveHourProjection), now: now,
-                        severity: model.fiveHourSeverity)
+                if showFiveHourChart, model.fiveHourPercent != nil {
+                    PanelSection(
+                        title: "\(WindowKind.fiveHour.longLabel) window",
+                        isExpanded: $expandedFiveHour
+                    ) {
+                        SparklineView(
+                            samples: model.samples, kind: .fiveHour,
+                            resetsAt: model.fiveHourResetsAt,
+                            projection: liveProjection(model.fiveHourProjection), now: now,
+                            severity: model.fiveHourSeverity)
+                    }
                 }
 
                 // The weekly window gets the same treatment for the same reason: the shaded
@@ -481,35 +540,43 @@ struct PanelView: View {
                 // is set by behaviour rather than by anything measurable in the last hour. On
                 // the fixed domain that cone is most of the chart's width, which is the honest
                 // proportion: most of the window is still ahead.
-                PanelSection(
-                    title: "\(WindowKind.sevenDay.longLabel) window", isExpanded: $expandedWeekly
-                ) {
-                    SparklineView(
-                        samples: model.samples, kind: .sevenDay,
-                        resetsAt: model.sevenDayResetsAt,
-                        projection: liveProjection(model.sevenDayProjection), now: now,
-                        severity: model.sevenDaySeverity)
+                if showWeeklyChart {
+                    PanelSection(
+                        title: "\(WindowKind.sevenDay.longLabel) window",
+                        isExpanded: $expandedWeekly
+                    ) {
+                        SparklineView(
+                            samples: model.samples, kind: .sevenDay,
+                            resetsAt: model.sevenDayResetsAt,
+                            projection: liveProjection(model.sevenDayProjection), now: now,
+                            severity: model.sevenDaySeverity)
+                    }
                 }
             }
 
-            PanelSection(
-                title: "Recent sessions (\(model.sessions.count))", isExpanded: $expandedSessions
-            ) {
-                if model.sessions.isEmpty, model.isScanning {
-                    note("Reading transcripts…")
-                } else {
-                    SessionsSection(sessions: model.sessions)
+            if showSessions {
+                PanelSection(
+                    title: "Recent sessions (\(model.sessions.count))",
+                    isExpanded: $expandedSessions
+                ) {
+                    if model.sessions.isEmpty, model.isScanning {
+                        note("Reading transcripts…")
+                    } else {
+                        SessionsSection(sessions: model.sessions)
+                    }
                 }
             }
 
             // Sits with the light sections rather than under "Last 30 days", even though both
             // cover the same month: this one is a fixed 24 bars however long the account has
             // been running, so it cannot grow the way the daily section can.
-            PanelSection(title: "When you work", isExpanded: $expandedHours) {
-                if model.hourProfile.isEmpty, model.isScanning {
-                    note("Reading transcripts…")
-                } else {
-                    HourProfileView(buckets: model.hourProfile)
+            if showHours {
+                PanelSection(title: "When you work", isExpanded: $expandedHours) {
+                    if model.hourProfile.isEmpty, model.isScanning {
+                        note("Reading transcripts…")
+                    } else {
+                        HourProfileView(buckets: model.hourProfile)
+                    }
                 }
             }
         }
@@ -519,45 +586,47 @@ struct PanelView: View {
     /// month of bars plus four proportion groups. In the wide layout it owns the second column.
     @ViewBuilder private var dailySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PanelSection(
-                title: "Last 30 days", isExpanded: $expandedDaily,
-                total: model.daily.isEmpty ? nil : Self.figure(dailyTotal)
-            ) {
-                VStack(alignment: .leading, spacing: 10) {
-                    if model.daily.isEmpty, model.isScanning {
-                        note("Reading transcripts…")
-                    } else {
-                        DailyBarsView(daily: model.daily)
-                    }
-                    // Labelled with their own period: the bars above are the last 30 days, but
-                    // `Aggregates.modelSplit` / `effortSplit` run over every cached event, and a
-                    // split silently attributed to the section header would overstate its window.
-                    if !modelRows.isEmpty {
-                        subLabel("Models · all recorded", total: Self.figure(modelTotal))
-                        ShareRowsView(rows: modelRows)
-                    }
-                    if !effortRows.isEmpty {
-                        subLabel("Effort · all recorded", total: Self.figure(effortTotal))
-                        ShareRowsView(rows: effortRows)
-                    }
-                    if !tokenRows.isEmpty {
-                        // The same total as the models heading, by construction — both are every
-                        // token recorded, split two different ways.
-                        subLabel(
-                            "Tokens · all recorded",
-                            total: UsageNumberFormat.tokens(tokenTotals.total))
-                        ShareRowsView(rows: tokenRows)
-                        // Without this the split invites the wrong conclusion. Cache reads
-                        // dominate the token count but bill at a tenth of the input rate, while
-                        // output is a rounding error by volume and bills at five times it — so
-                        // the two orderings barely resemble each other.
-                        note("Output is a small share of tokens and a large share of cost.")
-                    }
-                    if !costRows.isEmpty {
-                        subLabel(
-                            "Cost share · all recorded",
-                            total: UsageNumberFormat.cost(Breakdown.fieldCosts(models: model.models).total))
-                        ShareRowsView(rows: costRows)
+            if showDaily {
+                PanelSection(
+                    title: "Last 30 days", isExpanded: $expandedDaily,
+                    total: model.daily.isEmpty ? nil : Self.figure(dailyTotal)
+                ) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if model.daily.isEmpty, model.isScanning {
+                            note("Reading transcripts…")
+                        } else {
+                            DailyBarsView(daily: model.daily)
+                        }
+                        // Labelled with their own period: the bars above are the last 30 days, but
+                        // `Aggregates.modelSplit` / `effortSplit` run over every cached event, and a
+                        // split silently attributed to the section header would overstate its window.
+                        if !modelRows.isEmpty {
+                            subLabel("Models · all recorded", total: Self.figure(modelTotal))
+                            ShareRowsView(rows: modelRows)
+                        }
+                        if !effortRows.isEmpty {
+                            subLabel("Effort · all recorded", total: Self.figure(effortTotal))
+                            ShareRowsView(rows: effortRows)
+                        }
+                        if !tokenRows.isEmpty {
+                            // The same total as the models heading, by construction — both are every
+                            // token recorded, split two different ways.
+                            subLabel(
+                                "Tokens · all recorded",
+                                total: UsageNumberFormat.tokens(tokenTotals.total))
+                            ShareRowsView(rows: tokenRows)
+                            // Without this the split invites the wrong conclusion. Cache reads
+                            // dominate the token count but bill at a tenth of the input rate, while
+                            // output is a rounding error by volume and bills at five times it — so
+                            // the two orderings barely resemble each other.
+                            note("Output is a small share of tokens and a large share of cost.")
+                        }
+                        if !costRows.isEmpty {
+                            subLabel(
+                                "Cost share · all recorded",
+                                total: UsageNumberFormat.cost(Breakdown.fieldCosts(models: model.models).total))
+                            ShareRowsView(rows: costRows)
+                        }
                     }
                 }
             }
@@ -673,10 +742,12 @@ struct PanelView: View {
         let weekly = model.sevenDayCalibration
         // Still gated on having something to say. A collapsible empty section is worse than no
         // section: the chevron promises content that opening it does not produce.
-        if five != nil || weekly != nil || model.cyclePace != nil {
+        if showsHeadroom {
             PanelSection(title: "Headroom", isExpanded: $expandedHeadroom) {
                 grid(columns: 2) {
-                    if let five, let left = five.headroom(fromPercent: model.fiveHourPercent ?? 0) {
+                    if let five, let percent = model.fiveHourPercent,
+                        let left = five.headroom(fromPercent: percent)
+                    {
                         StatTile(
                             label: "5-hour left",
                             value: UsageNumberFormat.tokens(Int(left)),
@@ -764,68 +835,72 @@ struct PanelView: View {
             // three collapsed stats headers keep the same rhythm as the collapsed section headers
             // directly above them in `lightSections`.
             VStack(alignment: .leading, spacing: 8) {
-                PanelSection(
-                    title: "Today", isExpanded: $expandedToday,
-                    total: model.today.map {
-                        Self.figure(tokens: $0.tokens, cost: $0.costEquivalent)
-                    }
-                ) {
-                    grid(columns: 2) {
-                        StatTile(
-                            label: "Tokens in",
-                            value: UsageNumberFormat.tokens(
-                                (model.today?.tokens).map {
-                                    $0.input + $0.cacheRead + $0.cacheCreate
-                                } ?? 0),
-                            help: "Everything sent: fresh input plus cache reads and cache writes. "
-                                + "Cache reads usually dominate and bill at a tenth of the input "
-                                + "rate.")
-                        StatTile(
-                            label: "Tokens out",
-                            value: UsageNumberFormat.tokens(model.today?.tokens.output ?? 0),
-                            help: "Generated tokens. A small fraction of the volume and a large "
-                                + "fraction of the cost — output bills at five times the input "
-                                + "rate.")
-                        StatTile(
-                            label: "Sessions",
-                            value: "\(sessionsToday)",
-                            help: "Stretches of work that started today. One transcript session "
-                                + "counts more than once if it was picked up again after a pause "
-                                + "longer than the active-gap setting.")
-                        StatTile(
-                            label: "Cost equiv",
-                            value: UsageNumberFormat.cost(model.today?.costEquivalent ?? 0),
-                            help: "Equivalent spend at published API rates. A subscription is not "
-                                + "billed per token, so this is never a bill.")
+                if showToday {
+                    PanelSection(
+                        title: "Today", isExpanded: $expandedToday,
+                        total: model.today.map {
+                            Self.figure(tokens: $0.tokens, cost: $0.costEquivalent)
+                        }
+                    ) {
+                        grid(columns: 2) {
+                            StatTile(
+                                label: "Tokens in",
+                                value: UsageNumberFormat.tokens(
+                                    (model.today?.tokens).map {
+                                        $0.input + $0.cacheRead + $0.cacheCreate
+                                    } ?? 0),
+                                help: "Everything sent: fresh input plus cache reads and cache writes. "
+                                    + "Cache reads usually dominate and bill at a tenth of the input "
+                                    + "rate.")
+                            StatTile(
+                                label: "Tokens out",
+                                value: UsageNumberFormat.tokens(model.today?.tokens.output ?? 0),
+                                help: "Generated tokens. A small fraction of the volume and a large "
+                                    + "fraction of the cost — output bills at five times the input "
+                                    + "rate.")
+                            StatTile(
+                                label: "Sessions",
+                                value: "\(sessionsToday)",
+                                help: "Stretches of work that started today. One transcript session "
+                                    + "counts more than once if it was picked up again after a pause "
+                                    + "longer than the active-gap setting.")
+                            StatTile(
+                                label: "Cost equiv",
+                                value: UsageNumberFormat.cost(model.today?.costEquivalent ?? 0),
+                                help: "Equivalent spend at published API rates. A subscription is not "
+                                    + "billed per token, so this is never a bill.")
+                        }
                     }
                 }
 
-                PanelSection(
-                    title: "All recorded activity", isExpanded: $expandedAllRecorded,
-                    // The same corpus the breakdowns above split, so the two agree by
-                    // construction rather than by coincidence.
-                    total: model.models.isEmpty ? nil : Self.figure(modelTotal)
-                ) {
-                    grid {
-                        StatTile(
-                            label: "Cache hit",
-                            value: UsageNumberFormat.share(model.cacheHitRatio),
-                            help: "Share of input-side tokens served from cache. Output tokens "
-                                + "are excluded — they are generated, never read.")
-                        StatTile(
-                            label: "Active time",
-                            value: wallClockText,
-                            help: wallClockHelp)
-                        StatTile(
-                            label: "Agent hours",
-                            value: agentHoursText,
-                            help: agentHoursHelp)
-                        StatTile(
-                            label: "Sub-agents",
-                            value: UsageNumberFormat.share(model.sidechainShare),
-                            help: "Share of limit-weighted spend that went to sub-agents rather "
-                                + "than the main conversation. Weighted rather than raw, so it "
-                                + "answers how much of the limit they consume.")
+                if showAllRecorded {
+                    PanelSection(
+                        title: "All recorded activity", isExpanded: $expandedAllRecorded,
+                        // The same corpus the breakdowns above split, so the two agree by
+                        // construction rather than by coincidence.
+                        total: model.models.isEmpty ? nil : Self.figure(modelTotal)
+                    ) {
+                        grid {
+                            StatTile(
+                                label: "Cache hit",
+                                value: UsageNumberFormat.share(model.cacheHitRatio),
+                                help: "Share of input-side tokens served from cache. Output tokens "
+                                    + "are excluded — they are generated, never read.")
+                            StatTile(
+                                label: "Active time",
+                                value: wallClockText,
+                                help: wallClockHelp)
+                            StatTile(
+                                label: "Agent hours",
+                                value: agentHoursText,
+                                help: agentHoursHelp)
+                            StatTile(
+                                label: "Sub-agents",
+                                value: UsageNumberFormat.share(model.sidechainShare),
+                                help: "Share of limit-weighted spend that went to sub-agents rather "
+                                    + "than the main conversation. Weighted rather than raw, so it "
+                                    + "answers how much of the limit they consume.")
+                        }
                     }
                 }
 

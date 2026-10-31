@@ -48,6 +48,38 @@ public enum Prefs {
     /// heading.
     public static let expandedHeadroom = "expandedHeadroom"
 
+    /// The panel's collapsible sections, each of which Settings can hide outright. Hidden is a
+    /// stronger thing than collapsed: a collapsed section still costs a header row, and a reader
+    /// who never opens "When you work" should not have to scroll past it.
+    public enum PanelSectionKind: String, CaseIterable, Sendable {
+        case fiveHourChart
+        case weeklyChart
+        case sessions
+        case hours
+        case daily
+        case today
+        case allRecorded
+        case headroom
+
+        /// `Bool`. Default true for every section, so an install that never opens Settings shows
+        /// the panel it always did.
+        public var visibilityKey: String { "showSection.\(rawValue)" }
+
+        /// Matches the section's own header in the panel, so the checkbox names what it hides.
+        public var title: String {
+            switch self {
+            case .fiveHourChart: "\(WindowKind.fiveHour.longLabel) window"
+            case .weeklyChart: "\(WindowKind.sevenDay.longLabel) window"
+            case .sessions: "Recent sessions"
+            case .hours: "When you work"
+            case .daily: "Last 30 days"
+            case .today: "Today"
+            case .allRecorded: "All recorded activity"
+            case .headroom: "Headroom"
+            }
+        }
+    }
+
     /// `Bool`. Default false. Not a setting anyone chooses: it is the two-column decision the
     /// panel measured its way to last time, kept so it opens in the shape it closed in. The
     /// measurement it comes from does not exist until after the first layout pass, so without a
@@ -83,6 +115,7 @@ public enum Prefs {
         public static let expandedHeadroom = false
         public static let panelWide = false
         public static let preferredPollIntervalSeconds = 180
+        public static let sectionVisible = true
     }
 
     /// Bounds of the active-gap slider. Below 5 minutes a normal pause between prompts
@@ -161,6 +194,11 @@ public enum Prefs {
             panelWide: Default.panelWide,
             preferredPollIntervalSeconds: Default.preferredPollIntervalSeconds,
         ])
+        defaults.register(
+            defaults: Dictionary(
+                uniqueKeysWithValues: PanelSectionKind.allCases.map {
+                    ($0.visibilityKey, Default.sectionVisible as Any)
+                }))
     }
 
     // MARK: - Typed reads

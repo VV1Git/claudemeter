@@ -118,7 +118,7 @@ public enum MenuBarIcon {
     private static func accessibilityDescription(for key: Key) -> String {
         guard let percent = key.percent else { return "Claude usage unavailable" }
         let pace = key.capDot ? ", on pace to run out before it resets" : ""
-        return "Claude \(WindowKind.fiveHour.longLabel) usage \(percent) percent\(pace)"
+        return "Claude \(WindowKind.sevenDay.longLabel) usage \(percent) percent\(pace)"
     }
 }
 

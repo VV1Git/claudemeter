@@ -510,7 +510,7 @@ public enum MenuBarFormat: String, Codable, Sendable, CaseIterable {
         switch self {
         case .percentAndPace: "42% → 63%   (now and projected)"
         case .percent: "42%   (just the percentage)"
-        case .percentAndTimeLeft: "42% · 2h41m   (percentage and time to reset)"
+        case .percentAndTimeLeft: "42% · 3d2h   (percentage and time to reset)"
         case .iconOnly: "Icon only"
         }
     }

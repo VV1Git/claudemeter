@@ -46,6 +46,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             menuBarSection
+            panelSection
             usageHoursSection
             refreshSection
             credentialsSection
@@ -75,9 +76,24 @@ struct SettingsView: View {
             .pickerStyle(.radioGroup)
             .labelsHidden()
 
-            note("The menu bar tracks the 5-hour limit. The weekly limit lives in the panel.")
+            note("The menu bar tracks the weekly limit.")
         } header: {
             header("Menu bar")
+        }
+    }
+
+    // MARK: - Panel
+
+    /// One checkbox per collapsible section. The two meters at the top are not on the list: they
+    /// are what the panel gets opened for.
+    private var panelSection: some View {
+        Section {
+            ForEach(Prefs.PanelSectionKind.allCases, id: \.rawValue) { kind in
+                SectionToggle(kind: kind)
+            }
+            note("Hidden sections are left out of the panel entirely, header and all.")
+        } header: {
+            header("Panel")
         }
     }
 
@@ -580,5 +596,22 @@ struct SettingsView: View {
         let hours = total / 3600
         let minutes = (total % 3600) / 60
         return hours == 0 ? "\(minutes)m" : "\(hours)h \(minutes)m"
+    }
+}
+
+/// A checkbox bound to one section's visibility key. Its own view because `@AppStorage` takes its
+/// key at initialisation, and `ForEach` is what supplies the key.
+private struct SectionToggle: View {
+    let kind: Prefs.PanelSectionKind
+    @AppStorage private var isVisible: Bool
+
+    init(kind: Prefs.PanelSectionKind) {
+        self.kind = kind
+        _isVisible = AppStorage(wrappedValue: Prefs.Default.sectionVisible, kind.visibilityKey)
+    }
+
+    var body: some View {
+        Toggle(kind.title, isOn: $isVisible)
+            .toggleStyle(.checkbox)
     }
 }
