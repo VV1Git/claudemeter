@@ -486,3 +486,30 @@ struct KeychainPartitionTests {
         #expect(command.contains("-a first last") == false)
     }
 }
+
+@Suite("Refresh-token presence")
+struct RefreshTokenPresenceTests {
+    @Test("A refresh token past its stored deadline is still present")
+    func presentIgnoresDeadline() {
+        let credentials = ClaudeCredentials(
+            accessToken: "a", expiresAt: Date(), refreshToken: "r",
+            refreshTokenExpiresAt: Date.distantPast, subscriptionType: nil, rateLimitTier: nil)
+        #expect(credentials.usableRefreshToken(asOf: Date()) == nil)
+        #expect(credentials.presentRefreshToken == "r")
+    }
+
+    @Test("Dropping the refresh token keeps everything else")
+    func droppingKeepsTheRest() {
+        let credentials = ClaudeCredentials(
+            accessToken: "a", expiresAt: Date(timeIntervalSince1970: 1), refreshToken: "r",
+            refreshTokenExpiresAt: Date.distantPast, scopes: ["s"], clientID: "c",
+            subscriptionType: "max", rateLimitTier: "t")
+        let dropped = credentials.droppingRefreshToken()
+        #expect(dropped.presentRefreshToken == nil)
+        #expect(dropped.refreshTokenExpiresAt == nil)
+        #expect(dropped.accessToken == "a")
+        #expect(dropped.scopes == ["s"])
+        #expect(dropped.clientID == "c")
+        #expect(dropped.subscriptionType == "max")
+    }
+}

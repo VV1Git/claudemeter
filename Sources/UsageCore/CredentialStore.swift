@@ -179,11 +179,20 @@ public actor CredentialStore {
     /// `nil` means there was nothing to renew — no dedicated credential, or one with no usable
     /// refresh token, which is the shape `claude setup-token` produces.
     public func renewDedicated(now: Date = Date()) async throws -> ResolvedCredential? {
-        guard let stored = Keychain.readOwnCredentials(),
-            stored.usableRefreshToken(asOf: now) != nil
+        guard let stored = Keychain.readOwnCredentials(), stored.presentRefreshToken != nil
         else { return nil }
 
-        let tokens = try await refresher.refresh(stored, now: now)
+        let tokens: RefreshedTokens
+        do {
+            tokens = try await refresher.refresh(stored, now: now)
+        } catch let error as TokenRefreshError where error.requiresSignIn {
+            // The server refused the grant itself. Keeping the refresh token would spend a
+            // request on it every poll for nothing, so it is dropped; the access token stays, in
+            // case its own deadline is the wrong one, and the next poll asks for a sign-in.
+            try? Keychain.storeOwnCredentials(stored.droppingRefreshToken())
+            if cached?.source == .dedicated { cached = nil }
+            throw error
+        }
         let renewed = stored.applying(tokens)
         try Keychain.storeOwnCredentials(renewed)
         let resolved = ResolvedCredential(credentials: renewed, source: .dedicated)

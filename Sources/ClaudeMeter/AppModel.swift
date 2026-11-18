@@ -502,6 +502,8 @@ import UsageCore
             return fail(reason: message(for: error), now: now)
         }
 
+        signInExpiresAt = CredentialPolicy.signInExpiryWarning(resolved, now: now)
+
         let usable: ResolvedCredential
         switch CredentialPolicy.decide(
             resolved, now: now, lead: CredentialStore.refreshLeadTime)
@@ -512,7 +514,9 @@ import UsageCore
             switch await renewedDedicated(now: now) {
             case .renewed(let credential):
                 usable = credential
+                signInExpiresAt = CredentialPolicy.signInExpiryWarning(credential, now: now)
             case .signInRequired:
+                signInExpiresAt = nil
                 return settle(.staleCredentials)
             case .unavailable(let reason):
                 // The renewal failed for a reason that may not last — no network, a 500. If the
@@ -958,6 +962,7 @@ import UsageCore
         signInStage = .idle
         pendingSignIn = nil
         hasDedicatedToken = await credentials.hasDedicatedToken()
+        signInExpiresAt = CredentialPolicy.signInExpiryWarning(stored, now: Date())
 
         do {
             let fresh = try await client.fetch(
@@ -997,6 +1002,10 @@ import UsageCore
     /// True when the user has given ClaudeMeter a token of its own, so the panel can say which
     /// credential the numbers came from.
     public private(set) var hasDedicatedToken = false
+
+    /// When ClaudeMeter's own sign-in runs out, once that is within a few days. Nil otherwise,
+    /// and always nil while reading Claude Code's credential.
+    public private(set) var signInExpiresAt: Date?
 
     /// Adopts a token from `claude setup-token` and immediately spends it on a real request, so
     /// a token that does not work for this endpoint is reported now rather than at the next poll.
@@ -1040,6 +1049,7 @@ import UsageCore
     /// Forgets the dedicated token and goes back to reading Claude Code's credential.
     public func forgetDedicatedToken() async {
         await credentials.forgetDedicatedToken()
+        signInExpiresAt = nil
         hasDedicatedToken = await credentials.hasDedicatedToken()
         await refresh(force: true)
     }

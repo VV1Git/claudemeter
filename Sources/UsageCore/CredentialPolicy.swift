@@ -51,9 +51,33 @@ public enum CredentialPolicy {
             return credential.credentials.usableRefreshToken(asOf: now) != nil
                 ? .waitForClaudeCode : .signInRequired
         case .dedicated:
-            return credential.credentials.usableRefreshToken(asOf: now) != nil
+            // Any refresh token at all, not only one inside its stored deadline: that deadline
+            // is this machine's arithmetic on a lifetime the server once reported, and trusting
+            // it is how a working sign-in was abandoned without a single request. The token
+            // endpoint is the authority; a refusal there drops the refresh token for good.
+            return credential.credentials.presentRefreshToken != nil
                 ? .renew : .signInRequired
         }
+    }
+
+    /// How far ahead of the sign-in's end the user is told about it.
+    public static let signInWarningLead: TimeInterval = 3 * 24 * 3600
+
+    /// When this app's own sign-in runs out, if that is close enough to warn about.
+    ///
+    /// The refresh token has a hard deadline of its own, and renewing does not move it: once it
+    /// passes, the token endpoint refuses the grant and only a new browser sign-in helps. Saying
+    /// so a few days ahead turns an outage into a click made at a convenient moment. Claude
+    /// Code's credential is never warned about here; renewing it is Claude Code's job.
+    public static func signInExpiryWarning(
+        _ credential: ResolvedCredential, now: Date, lead: TimeInterval = signInWarningLead
+    ) -> Date? {
+        guard credential.source == .dedicated,
+            credential.credentials.presentRefreshToken != nil,
+            let deadline = credential.credentials.refreshTokenExpiresAt,
+            deadline.timeIntervalSince(now) <= lead
+        else { return nil }
+        return deadline
     }
 
     /// The same decision for a token the server has just refused.
@@ -65,9 +89,12 @@ public enum CredentialPolicy {
         _ credential: ResolvedCredential,
         now: Date
     ) -> Renewal {
-        guard credential.credentials.usableRefreshToken(asOf: now) != nil else {
-            return .signInRequired
+        switch credential.source {
+        case .dedicated:
+            return credential.credentials.presentRefreshToken != nil ? .renew : .signInRequired
+        case .claudeCode:
+            return credential.credentials.usableRefreshToken(asOf: now) != nil
+                ? .waitForClaudeCode : .signInRequired
         }
-        return credential.source == .dedicated ? .renew : .waitForClaudeCode
     }
 }

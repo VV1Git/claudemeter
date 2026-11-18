@@ -325,6 +325,17 @@ struct TokenRefreshRequestTests {
         }
     }
 
+    @Test("A stored refresh deadline in the past still asks the server")
+    func pastStoredDeadlineStillRefreshes() async throws {
+        Stub.set(status: 200, body: Data(fullResponseJSON.utf8))
+        let stale = ClaudeCredentials(
+            accessToken: "a", expiresAt: anchor, refreshToken: "r",
+            refreshTokenExpiresAt: anchor.addingTimeInterval(-3600),
+            subscriptionType: nil, rateLimitTier: nil)
+        _ = try await TokenRefresher(session: Stub.session()).refresh(stale, now: anchor)
+        #expect(Stub.lastRequest() != nil)
+    }
+
     @Test("No usable refresh token means no request is made at all")
     func noRequestWithoutRefreshToken() async throws {
         Stub.set(status: 200, body: Data(fullResponseJSON.utf8))

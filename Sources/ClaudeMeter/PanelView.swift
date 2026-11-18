@@ -349,6 +349,13 @@ struct PanelView: View {
                     .frame(width: Self.narrowContentWidth, alignment: .leading)
             }
 
+            // A heads-up, not a fault: the numbers are live, so it sits outside `healthNotice`.
+            // Suppressed once the sign-in has actually lapsed, where that notice says it instead.
+            if let deadline = model.signInExpiresAt, model.health != .staleCredentials {
+                HealthNotice(notice: signInExpiryNotice(deadline))
+                    .frame(width: Self.narrowContentWidth, alignment: .leading)
+            }
+
             // Kept out of `healthNotice` rather than folded into it: a lockout leaves this app's
             // own numbers perfectly live, so `health` is `.live` and `healthNotice` is nil at
             // exactly the moment this has to be on screen.
@@ -1084,11 +1091,15 @@ struct PanelView: View {
             return model.hasDedicatedToken
                 ? notice(
                     symbol: "exclamationmark.triangle",
-                    title: "ClaudeMeter's token was refused",
-                    detail: "The token you gave ClaudeMeter no longer works. Run `claude "
-                        + "setup-token` again and paste the new one into Settings, or remove it "
-                        + "there to go back to reading Claude Code's credential.",
-                    tint: SeverityStyle.color(.warning))
+                    title: "ClaudeMeter's sign-in has expired",
+                    detail: "Anthropic would not renew ClaudeMeter's own credential, so it needs "
+                        + "a fresh sign-in. It takes one click in the browser and does not touch "
+                        + "Claude Code's sign-in. You can also remove the credential in Settings "
+                        + "to go back to reading Claude Code's.",
+                    tint: SeverityStyle.color(.warning),
+                    action: HealthNotice.Notice.Action(title: "Sign In Again\u{2026}") {
+                        signInAgain()
+                    })
                 : notice(
                     symbol: "exclamationmark.triangle",
                     title: "Sign in again",
@@ -1137,6 +1148,35 @@ struct PanelView: View {
                 title: offlineTitle(since: since),
                 detail: detail,
                 tint: Color.secondary)
+        }
+    }
+
+    private func signInExpiryNotice(_ deadline: Date) -> HealthNotice.Notice {
+        let left = deadline.timeIntervalSince(now)
+        let when = left < 60
+            ? "has run out"
+            : "runs out in \(MenuBarLabelText.compactDuration(until: deadline, now: now))"
+        return HealthNotice.Notice(
+            symbol: "clock.badge.exclamationmark",
+            title: "ClaudeMeter's sign-in \(when)",
+            detail: "Anthropic caps how long a sign-in can be renewed, and renewing does not "
+                + "extend it. Sign in again now to reset the clock, so the meter does not stop "
+                + "when it lapses.",
+            tint: SeverityStyle.color(.warning),
+            action: HealthNotice.Notice.Action(title: "Sign In Again\u{2026}") {
+                signInAgain()
+            })
+    }
+
+    /// Starts the browser sign-in straight from the notice. Settings is opened only when the
+    /// flow needs more from the user than a click in the browser: a code to paste back because
+    /// no loopback port could be had, or an error to read and retry from.
+    private func signInAgain() {
+        Task { @MainActor in
+            let failure = await model.signIn()
+            if failure != nil || model.signInStage == .awaitingPastedCode {
+                SettingsWindowController.shared.show()
+            }
         }
     }
 

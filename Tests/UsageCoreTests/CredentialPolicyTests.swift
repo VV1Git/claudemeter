@@ -76,10 +76,46 @@ struct CredentialPolicyTests {
         let deadRefresh = credentials(
             expiringAt: anchor.addingTimeInterval(-60),
             refreshTokenExpiresAt: anchor.addingTimeInterval(-1))
-        for dead in [noToken, emptyToken, deadRefresh] {
+        for dead in [noToken, emptyToken] {
             #expect(decide(dead, from: .claudeCode) == .signInRequired)
             #expect(decide(dead, from: .dedicated) == .signInRequired)
         }
+        #expect(decide(deadRefresh, from: .claudeCode) == .signInRequired)
+    }
+
+    /// The stored refresh deadline is this machine's arithmetic on a lifetime the server once
+    /// reported. Trusting it abandoned a working sign-in without a single request and then
+    /// called the token "refused". For a credential this app owns, the server decides.
+    @Test("A sign-in is warned about only when it is this app's and close to its end")
+    func signInExpiryWarning() {
+        func resolved(_ deadline: Date?, _ source: CredentialSource, refresh: String? = "r")
+            -> ResolvedCredential
+        {
+            ResolvedCredential(
+                credentials: credentials(
+                    expiringAt: anchor.addingTimeInterval(3600), refreshToken: refresh,
+                    refreshTokenExpiresAt: deadline),
+                source: source)
+        }
+        let soon = anchor.addingTimeInterval(2 * 86_400)
+        let far = anchor.addingTimeInterval(10 * 86_400)
+        #expect(CredentialPolicy.signInExpiryWarning(resolved(soon, .dedicated), now: anchor) == soon)
+        #expect(CredentialPolicy.signInExpiryWarning(resolved(far, .dedicated), now: anchor) == nil)
+        #expect(CredentialPolicy.signInExpiryWarning(resolved(nil, .dedicated), now: anchor) == nil)
+        #expect(CredentialPolicy.signInExpiryWarning(resolved(soon, .claudeCode), now: anchor) == nil)
+        #expect(
+            CredentialPolicy.signInExpiryWarning(
+                resolved(soon, .dedicated, refresh: nil), now: anchor) == nil)
+    }
+
+    @Test("This app's own credential is renewed past its stored refresh deadline")
+    func dedicatedIgnoresStoredRefreshDeadline() {
+        let pastDeadline = credentials(
+            expiringAt: anchor.addingTimeInterval(-60),
+            refreshTokenExpiresAt: anchor.addingTimeInterval(-3600))
+        #expect(decide(pastDeadline, from: .dedicated) == .renew)
+        #expect(afterRejection(pastDeadline, from: .dedicated) == .renew)
+        #expect(afterRejection(pastDeadline, from: .claudeCode) == .signInRequired)
     }
 
     @Test("The lead time is inclusive at its own boundary")

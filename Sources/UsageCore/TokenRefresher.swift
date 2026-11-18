@@ -120,7 +120,9 @@ public struct TokenRefresher: Sendable {
     public func refresh(
         _ credentials: ClaudeCredentials, now: Date = Date()
     ) async throws -> RefreshedTokens {
-        guard let refreshToken = credentials.usableRefreshToken(asOf: now) else {
+        // Presence only. The stored deadline is not consulted: it can be wrong, and a refusal
+        // from this endpoint is the one answer that cannot be.
+        guard let refreshToken = credentials.presentRefreshToken else {
             throw TokenRefreshError.noRefreshToken
         }
 

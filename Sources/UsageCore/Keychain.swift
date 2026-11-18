@@ -65,9 +65,35 @@ public struct ClaudeCredentials: Sendable, Equatable {
     /// A refresh token that is present, non-empty, and not itself past its deadline.
     /// Nil means the credentials cannot be renewed and the user has to sign in again.
     public func usableRefreshToken(asOf now: Date) -> String? {
-        guard let refreshToken, !refreshToken.isEmpty else { return nil }
+        guard let refreshToken = presentRefreshToken else { return nil }
         if let refreshTokenExpiresAt, refreshTokenExpiresAt <= now { return nil }
         return refreshToken
+    }
+
+    /// The refresh token if there is one at all, whatever its stored deadline says.
+    ///
+    /// For a credential this app owns, the stored deadline is advice, not a verdict. It is a
+    /// lifetime the server once reported, turned into a date on this machine, and a meter that
+    /// trusted it gave up on a sign-in without ever asking the server — then told the user the
+    /// token had been "refused". Only the token endpoint can refuse a refresh token, so for a
+    /// dedicated credential the attempt is made and its answer is what counts.
+    public var presentRefreshToken: String? {
+        guard let refreshToken, !refreshToken.isEmpty else { return nil }
+        return refreshToken
+    }
+
+    /// The same credentials with the refresh token removed, for when the server has refused it.
+    /// Stored so the app stops spending a request on a grant it already knows is dead.
+    public func droppingRefreshToken() -> ClaudeCredentials {
+        ClaudeCredentials(
+            accessToken: accessToken,
+            expiresAt: expiresAt,
+            refreshToken: nil,
+            refreshTokenExpiresAt: nil,
+            scopes: scopes,
+            clientID: clientID,
+            subscriptionType: subscriptionType,
+            rateLimitTier: rateLimitTier)
     }
 }
 
