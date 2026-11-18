@@ -456,6 +456,11 @@ Showing whichever window is furthest along sounds more useful and is not: a week
 moves, so the icon would sit unchanged for hours and stop being a live signal. The weekly window
 lives in the panel, where a number that changes slowly is fine.
 
+The exception is a plan with no session limit at all (Claude Ultra). The endpoint then sends no
+`five_hour` window and no `session` row in `limits[]`, and only that pair, not one null on its own,
+is read as "this plan has no session limit". The menu bar then follows the weekly window, and the
+panel drops the 5-hour meter and chart instead of showing an em dash.
+
 ### Settings is an AppKit window, not a SwiftUI `Settings` scene
 
 The app runs with `.accessory` activation policy, and an accessory app cannot reliably take focus.

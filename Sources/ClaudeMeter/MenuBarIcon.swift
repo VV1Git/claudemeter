@@ -24,7 +24,8 @@ public enum MenuBarIcon {
     /// `showsCapDot` adds a filled centre dot for `Projection.willCapEarly`. `badge` is an SF
     /// Symbol name drawn to the right of the ring, for a reading that has stopped being live.
     public static func image(
-        percent: Double?, severity: Severity, showsCapDot: Bool, badge: String? = nil
+        percent: Double?, severity: Severity, showsCapDot: Bool, badge: String? = nil,
+        kind: WindowKind = .fiveHour
     ) -> NSImage {
         let key = Key(
             percent: percent.map { Int(min(100, max(0, $0)).rounded()) },
@@ -33,7 +34,8 @@ public enum MenuBarIcon {
             dark: menuBarIsDark,
             scale: rasterScale,
             accent: accentComponents,
-            badge: badge
+            badge: badge,
+            kind: kind
         )
         if let cached = cache[key] { return cached }
         let rendered = render(key)
@@ -62,6 +64,7 @@ public enum MenuBarIcon {
         /// Part of the key because it changes the bitmap's *width*, not just its pixels — a cached
         /// ring reused for a badged state would be the wrong size as well as the wrong picture.
         let badge: String?
+        let kind: WindowKind
     }
 
     /// A rasterised image cannot re-resolve semantic colours when the appearance flips, so the
@@ -118,7 +121,7 @@ public enum MenuBarIcon {
     private static func accessibilityDescription(for key: Key) -> String {
         guard let percent = key.percent else { return "Claude usage unavailable" }
         let pace = key.capDot ? ", on pace to run out before it resets" : ""
-        return "Claude \(WindowKind.sevenDay.longLabel) usage \(percent) percent\(pace)"
+        return "Claude \(key.kind.longLabel) usage \(percent) percent\(pace)"
     }
 }
 

@@ -90,6 +90,27 @@ public struct UsageSnapshot: Codable, Sendable, Equatable {
         self.fetchedAt = fetchedAt
     }
 
+    /// Whether the account's plan has a 5-hour session limit at all.
+    ///
+    /// Some plans (Claude Ultra) dropped the session window and are limited weekly only. The
+    /// endpoint says so by omitting both `five_hour` and any `session` row in `limits[]`, and that
+    /// pair is the signal rather than either alone: a window with nothing to report is not the
+    /// same thing as a plan with no window, and one stray null should not hide the meter.
+    public var hasSessionLimit: Bool {
+        fiveHour != nil || limits.contains { $0.group == "session" || $0.kind == "session" }
+    }
+
+    /// The window the menu bar follows: the 5-hour one where the plan has it, because it moves
+    /// fast enough to be a live signal, and the weekly one where it does not — a ring stuck on
+    /// an em dash says nothing at all.
+    public var primaryWindowKind: WindowKind {
+        hasSessionLimit ? .fiveHour : .sevenDay
+    }
+
+    public func window(for kind: WindowKind) -> LimitWindow? {
+        kind == .fiveHour ? fiveHour : sevenDay
+    }
+
     /// Which window to surface in the menu bar: whichever is further along.
     /// Falls back to the other window if only one is present.
     public var mostConstrained: (kind: WindowKind, window: LimitWindow)? {
@@ -510,7 +531,7 @@ public enum MenuBarFormat: String, Codable, Sendable, CaseIterable {
         switch self {
         case .percentAndPace: "42% → 63%   (now and projected)"
         case .percent: "42%   (just the percentage)"
-        case .percentAndTimeLeft: "42% · 3d2h   (percentage and time to reset)"
+        case .percentAndTimeLeft: "42% · 2h41m   (percentage and time to reset)"
         case .iconOnly: "Icon only"
         }
     }

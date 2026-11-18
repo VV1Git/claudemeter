@@ -65,10 +65,11 @@ private struct MenuBarLabel: View {
         // instead of just redrawing it.
         _ = colorScheme
 
-        // The weekly window, not the 5-hour one. Ultra accounts stopped reporting a 5-hour window
-        // on 30 October 2026, and the weekly cap is the one every plan still runs into.
-        let window = model.snapshot?.sevenDay
-        let projection = model.sevenDayProjection
+        // The 5-hour window on plans that have one; the weekly window on Claude Ultra, which
+        // stopped reporting a 5-hour window on 30 October 2026.
+        let kind = model.menuBarKind
+        let window = model.menuBarWindow
+        let projection = model.menuBarProjection
         let text = MenuBarLabelText.text(
             format: format,
             percent: window?.utilization,
@@ -84,9 +85,10 @@ private struct MenuBarLabel: View {
             // screenshot tells you.
             Image(nsImage: MenuBarIcon.image(
                 percent: window?.utilization,
-                severity: model.snapshot?.severity(for: .sevenDay) ?? .normal,
+                severity: model.snapshot?.severity(for: kind) ?? .normal,
                 showsCapDot: projection?.willCapEarly ?? false,
-                badge: status?.symbol
+                badge: status?.symbol,
+                kind: kind
             ))
             .renderingMode(.original)
             .accessibilityLabel(Text(status?.description ?? "Claude usage"))

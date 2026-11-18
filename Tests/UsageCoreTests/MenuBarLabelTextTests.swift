@@ -68,13 +68,12 @@ struct MenuBarLabelTextTests {
 
     /// The settings screen advertises each format with a literal example. If the formatter and
     /// those labels drift apart the radio buttons start lying, so they are pinned together.
-    /// A weekly-sized reset, since the weekly window is the one the menu bar tracks.
+    /// A 5-hour-sized reset, since that is the window the menu bar tracks on most plans.
     @Test("The settings labels match what the formatter actually produces")
     func settingsLabelsMatchOutput() {
         for format in MenuBarFormat.allCases where format != .iconOnly {
             let produced = label(
-                format, percent: 42, projectedAtReset: 63,
-                resetsAt: reset(inMinutes: (3 * 24 + 2) * 60))
+                format, percent: 42, projectedAtReset: 63, resetsAt: reset(inMinutes: 161))
             #expect(format.settingsLabel.hasPrefix(produced))
         }
     }

@@ -498,12 +498,11 @@ struct PanelView: View {
         model.snapshot != nil || isLive
     }
 
-    /// Whether the account still has a 5-hour window at all. Verified Ultra accounts stopped
-    /// reporting one on 30 October 2026, and a meter that can only ever read `—` is noise. Before
-    /// the first reading there is nothing to go on, so the row stays as the placeholder it was.
-    private var showsFiveHour: Bool {
-        model.snapshot == nil || model.fiveHourPercent != nil
-    }
+    /// Whether the plan has a 5-hour window at all. Verified Ultra accounts stopped reporting one
+    /// on 30 October 2026, and a meter that can only ever read `—` is noise. Decided by
+    /// `UsageSnapshot.hasSessionLimit`, the same signal the menu bar follows, so the two cannot
+    /// disagree about which plan this is.
+    private var showsFiveHour: Bool { model.hasSessionLimit }
 
     /// A cached percentage is still a reading that was true at a stated time; a cached projection
     /// is a forecast from a rate nobody is measuring any more, aimed at a reset that may already
@@ -528,7 +527,7 @@ struct PanelView: View {
                 // already wrong on both counts — the old domain reached across turnovers and
                 // measured 6.93 hours. Built from `longLabel` so they cannot drift from the
                 // meter rows directly above, which read "5-hour" and "Weekly".
-                if showFiveHourChart, model.fiveHourPercent != nil {
+                if showFiveHourChart, model.hasSessionLimit {
                     PanelSection(
                         title: "\(WindowKind.fiveHour.longLabel) window",
                         isExpanded: $expandedFiveHour

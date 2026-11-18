@@ -258,8 +258,9 @@ import UsageCore
 
     // MARK: - Derived values
 
-    /// The menu bar always shows the 5-hour window, never the most constrained one — a weekly
-    /// figure that barely moves would make the icon useless as a live signal.
+    /// The menu bar shows the 5-hour window rather than the most constrained one — a weekly
+    /// figure that barely moves would make the icon useless as a live signal. On a plan with no
+    /// session limit (Claude Ultra) it falls back to the weekly window (see `menuBarKind`).
     public var fiveHourPercent: Double? { snapshot?.fiveHour?.utilization }
     public var fiveHourResetsAt: Date? { snapshot?.fiveHour?.resetsAt }
     public var fiveHourSeverity: Severity { snapshot?.severity(for: .fiveHour) ?? .normal }
@@ -268,8 +269,22 @@ import UsageCore
     public var sevenDayResetsAt: Date? { snapshot?.sevenDay?.resetsAt }
     public var sevenDaySeverity: Severity { snapshot?.severity(for: .sevenDay) ?? .normal }
 
+    /// False once a reading shows the plan has no 5-hour session limit (Claude Ultra), so the
+    /// panel stops drawing a session meter that can only ever read "—". Before the first reading
+    /// the answer is unknown, and the session meter is assumed, as it is on most plans.
+    public var hasSessionLimit: Bool { snapshot?.hasSessionLimit ?? true }
+
+    /// The window the menu bar shows: 5-hour where it exists, weekly where it does not.
+    public var menuBarKind: WindowKind { snapshot?.primaryWindowKind ?? .fiveHour }
+    public var menuBarWindow: LimitWindow? { snapshot?.window(for: menuBarKind) }
+    public var menuBarProjection: Projection? { projection(for: menuBarKind) }
+
+    public func projection(for kind: WindowKind) -> Projection? {
+        kind == .fiveHour ? fiveHourProjection : sevenDayProjection
+    }
+
     /// Whether the menu bar ring should carry its cap dot.
-    public var showsCapDot: Bool { sevenDayProjection?.willCapEarly ?? false }
+    public var showsCapDot: Bool { menuBarProjection?.willCapEarly ?? false }
 
     /// Today's bucket from the 30-day series, for the stats grid.
     public var today: DailyStat? { daily.last }

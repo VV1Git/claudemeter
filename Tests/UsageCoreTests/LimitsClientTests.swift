@@ -161,6 +161,31 @@ struct LimitsClientTests {
 
     // MARK: - Sparse (hostile) capture
 
+    @Test func fullPayloadHasASessionLimit() throws {
+        let snapshot = try Self.fullSnapshot()
+        #expect(snapshot.hasSessionLimit)
+        #expect(snapshot.primaryWindowKind == .fiveHour)
+    }
+
+    /// The shape a weekly-only plan (Claude Ultra) sends: no `five_hour`, no `session` row.
+    @Test func sparseCaptureHasNoSessionLimitAndFollowsTheWeeklyWindow() throws {
+        let snapshot = try Self.sparseSnapshot()
+        #expect(snapshot.hasSessionLimit == false)
+        #expect(snapshot.primaryWindowKind == .sevenDay)
+        #expect(snapshot.window(for: .sevenDay)?.utilization == 93.5)
+    }
+
+    /// One null window is not a plan change: a `session` row alone keeps the session meter.
+    @Test func sessionRowAloneKeepsTheSessionLimit() {
+        let snapshot = UsageSnapshot(
+            fiveHour: nil, sevenDay: nil,
+            limits: [RateLimit(
+                kind: "session", group: "session", percent: 0, severity: .normal,
+                resetsAt: nil, scopeLabel: nil, isActive: false)],
+            extraUsage: nil, fetchedAt: Date())
+        #expect(snapshot.hasSessionLimit)
+    }
+
     @Test func sparseCaptureDecodesWithoutThrowing() throws {
         let fetchedAt = Date(timeIntervalSince1970: 1_768_700_000)
         let snapshot = try Self.sparseSnapshot(fetchedAt: fetchedAt)

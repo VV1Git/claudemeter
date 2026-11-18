@@ -15,7 +15,9 @@ reading the panel.
 The menu bar item is a ring plus, depending on your chosen format, some text. It always tracks the
 **5-hour window**, never the most constrained one. A weekly percentage moves so slowly that an icon
 driven by it would sit still for days, which makes it useless as a live signal; the weekly window
-lives in the panel instead.
+lives in the panel instead. On a plan with no 5-hour limit (Claude Ultra) there is no session
+window to track, so the ring follows the **weekly** window and the panel shows only the weekly
+meter.
 
 ### The four formats
 

@@ -76,7 +76,8 @@ struct SettingsView: View {
             .pickerStyle(.radioGroup)
             .labelsHidden()
 
-            note("The menu bar tracks the weekly limit.")
+            note("The menu bar tracks the 5-hour limit, or the weekly one on plans without a "
+                + "5-hour limit.")
         } header: {
             header("Menu bar")
         }
